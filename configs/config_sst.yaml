@@ -8,7 +8,7 @@ model:
 variables:
   input_variables:
     # List of input features in order of preference
-    - 'sst'       # Sea surface temperature
+    - 'aice'       # Sea ice concentration
     - 'sss'       # Sea surface salinity
     - 'tair'      # Air temperature
     - 'tsfc'      # Surface temperature
@@ -29,13 +29,13 @@ variables:
 
   output_variables:
     # List of output targets
-    - 'aice'      # Sea ice concentration
+    - 'sst'      # Sea surface temperature
 
   # Optional: limit number of input features (for backward compatibility)
   max_input_features: null  # Set to null to use all, or specify a number
 
 domain:
-  mask_mode: "sea_ice"
+  mask_mode: "both"
 
 data:
   data_path: "gdas.ice.t00z.inst.f009.nc"
@@ -72,6 +72,6 @@ training:
   min_epochs_jacobian: 100000             # Minimum epochs before Jacobian stopping
 
 output:
-  model_dir: "models_aice/"
+  model_dir: "models_sst/"
 
 use_cuda: true

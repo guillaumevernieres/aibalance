@@ -41,8 +41,8 @@ data:
   data_path: "gdas.ice.t00z.inst.f009.nc"
   validation_split: 0.1
   num_workers: 0
-  num_samples: 1000000
-  thin_fraction: 0.01
+  max_patterns: 400000  # Maximum patterns to extract from NetCDF
+  thin_fraction: 0.01   # Keep 1% of extracted patterns
 
 training:
   epochs: 100000

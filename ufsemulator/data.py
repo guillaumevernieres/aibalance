@@ -463,15 +463,22 @@ def create_training_data_from_netcdf(netcdf_file: str,
         config: Configuration with domain settings
         output_file: Output file for processed training data
         max_patterns: Maximum number of training patterns
+            (overridden by config if present)
 
     Returns:
         Path to saved training data file
     """
+    # Get max_patterns and thin_fraction from config if available
+    data_config = config.get('data', {})
+    max_patterns = data_config.get('max_patterns', max_patterns)
+    thin_fraction = data_config.get('thin_fraction', 1.0)
+
     preparer = IceDataPreparer(config)
     preparer.prepare_training_data(
         netcdf_file,
         max_patterns=max_patterns,
-        output_file=output_file
+        output_file=output_file,
+        thin_fraction=thin_fraction
     )
     return output_file
 
