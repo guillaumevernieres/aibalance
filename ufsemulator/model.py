@@ -72,10 +72,9 @@ class UfsEmulatorFFNN(nn.Module):
         """
         file_path = Path(model_filename)
         path = file_path.parent
-        filename = file_path.name
 
         moments = [self.input_mean, self.input_std]
-        norm_path = path / f"normalization.{filename}"
+        norm_path = path / "normalization.pt"
         torch.save(moments, norm_path)
         print(f"Saved normalization to: {norm_path}")
 
@@ -87,18 +86,10 @@ class UfsEmulatorFFNN(nn.Module):
         path = file_path.parent
 
         norm_path = path / "normalization.pt"
-        if norm_path.exists():
-            moments = torch.load(norm_path)
-            self.input_mean.data = moments[0]
-            self.input_std.data = moments[1]
-            print(f"Loaded normalization from: {norm_path}")
-        else:
-            filename = file_path.name
-            old_norm_path = path / f"normalization.{filename}"
-            moments = torch.load(old_norm_path)
-            self.input_mean.data = moments[0]
-            self.input_std.data = moments[1]
-            print(f"Loaded normalization from: {old_norm_path}")
+        moments = torch.load(norm_path)
+        self.input_mean.data = moments[0]
+        self.input_std.data = moments[1]
+        print(f"Loaded normalization from: {norm_path}")
 
     def init_weights(self) -> None:
         """

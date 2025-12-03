@@ -178,27 +178,15 @@ class UfsEmulatorInferencePlotter:
 
         # Load normalization parameters
         try:
-            # Try different normalization file locations
-            norm_paths = [
-                Path(model_path).parent / "normalization.pt",
-                Path(model_path).parent / "normalization.normalization.pt",
-                Path(model_path).parent / f"normalization.{Path(model_path).stem}.pt"
-            ]
-
-            loaded = False
-            for norm_path in norm_paths:
-                if norm_path.exists():
-                    moments = torch.load(norm_path, map_location=self.device, weights_only=False)
-                    model.input_mean.data = moments[0]
-                    model.input_std.data = moments[1]
-                    print(f"✅ Loaded normalization from: {norm_path}")
-                    loaded = True
-                    break
-
-            if not loaded:
+            norm_path = Path(model_path).parent / "normalization.pt"
+            if norm_path.exists():
+                moments = torch.load(norm_path, map_location=self.device, weights_only=False)
+                model.input_mean.data = moments[0]
+                model.input_std.data = moments[1]
+                print(f"✅ Loaded normalization from: {norm_path}")
+            else:
                 print("⚠️ No normalization file found, trying model.load_norm...")
                 model.load_norm(model_path)
-                loaded = True
 
         except Exception as e:
             print(f"Warning: Could not load normalization: {e}")
