@@ -1,0 +1,73 @@
+model:
+  input_size: 14  # Will be computed automatically from input_variables
+  hidden_size: 64
+  hidden_layers: 3
+  output_size: 1  # Will be computed automatically from output_variables
+
+# Define input and output variables
+variables:
+  input_variables:
+    # List of input features in order of preference
+    - 'sst'       # Sea surface temperature
+    - 'sss'       # Sea surface salinity
+    - 'tair'      # Air temperature
+    - 'tsfc'      # Surface temperature
+    - 'hi'        # Ice thickness
+    - 'hs'        # Snow thickness
+    - 'sice'      # Ice salinity
+    - 'strocnx'   # Ocean/ice stress (x)
+    - 'strocny'   # Ocean/ice stress (y)
+    - 'strairx'   # Atm/ice stress (x)
+    - 'strairy'   # Atm/ice stress (y)
+    - 'qref'      # 2m reference specific humidity
+    - 'flwdn'     # Down longwave flux
+    - 'fswdn'     # Down solar flux
+
+  output_variables:
+    # List of output targets
+    - 'aice'      # Sea ice concentration
+
+  # Optional: limit number of input features (for backward compatibility)
+  max_input_features: null  # Set to null to use all, or specify a number
+
+domain:
+  mask_mode: "both"      # Training domain: "sea_ice", "ocean", or "both"
+
+data:
+  data_path: "gdas.ice.t00z.inst.f009.nc"
+  validation_split: 0.1
+  num_workers: 0
+  num_samples: 1000000
+  thin_fraction: 0.01
+
+training:
+  epochs: 100000
+  batch_size: 1000
+  optimizer:
+    type: "adam"
+    learning_rate: 0.0001
+    weight_decay: 0.0001
+  scheduler: null  # Disabled - using constant learning rate
+  loss_function: "mse"
+  early_stopping_patience: 50
+  log_interval: 2
+  # Plotting options
+  use_log_scale_loss: true       # Use log scale for loss plots (recommended)
+  save_interval: 20
+  # Jacobian convergence tracking (for data assimilation)
+  jacobian_freq: 1      # Compute Jacobian metrics every N epochs
+  track_jacobian: true  # Enable/disable Jacobian tracking
+  # Advanced stopping criteria
+  convergence_tolerance: 0.0000000000000001    # Relative loss change threshold
+  convergence_window: 5          # Number of epochs to check convergence
+  min_epochs: 3000                 # Minimum epochs before early stopping
+  # Jacobian-based stopping criteria
+  use_jacobian_stopping: true         # Enable Jacobian convergence stopping
+  jacobian_convergence_tolerance: 0.0000000000001  # Relative change in Jacobian metrics
+  jacobian_convergence_window: 5      # Number of Jacobian evaluations for convergence
+  min_epochs_jacobian: 100000             # Minimum epochs before Jacobian stopping
+
+output:
+  model_dir: "models/"
+
+use_cuda: true

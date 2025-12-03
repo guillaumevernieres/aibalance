@@ -1,0 +1,25 @@
+data:
+  data_path: gdas.ice.t00z.inst.f009.nc
+  thin_fraction: 0.01
+  validation_split: 0.1
+domain:
+  mask_mode: both
+  min_ice_concentration: 0.05
+model:
+  hidden_layers: 3
+  hidden_size: 64
+training:
+  batch_size: 1000
+  epochs: 10000
+  optimizer:
+    learning_rate: 0.0001
+    type: adam
+variables:
+  input_variables:
+  - sst
+  - sss
+  - tair
+  - hi
+  - hs
+  output_variables:
+  - aice
