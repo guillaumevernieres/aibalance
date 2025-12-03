@@ -1372,6 +1372,9 @@ def main() -> None:
                         help='Local rank for distributed training')
     parser.add_argument('--world-size', type=int, default=1,
                         help='Total processes for distributed training')
+    parser.add_argument('--no-distributed', action='store_true',
+                        help='Disable distributed training even in '
+                             'SLURM/MPI environment')
     parser.add_argument('--restart-from-best', action='store_true',
                         help='Restart training from best_model.pt checkpoint')
     parser.add_argument('--restart-from-checkpoint', type=str, default=None,
@@ -1412,13 +1415,14 @@ def main() -> None:
     world_size = args.world_size
     rank = args.local_rank
 
-    # Override with HPC environment variables if present
-    if 'SLURM_PROCID' in os.environ:
-        rank = int(os.environ['SLURM_PROCID'])
-        world_size = int(os.environ['SLURM_NPROCS'])
-    elif 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        rank = int(os.environ['RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
+    # Override with HPC environment variables if present (unless disabled)
+    if not args.no_distributed:
+        if 'SLURM_PROCID' in os.environ:
+            rank = int(os.environ['SLURM_PROCID'])
+            world_size = int(os.environ['SLURM_NPROCS'])
+        elif 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+            rank = int(os.environ['RANK'])
+            world_size = int(os.environ['WORLD_SIZE'])
 
     if world_size > 1:
         print(f"Starting distributed training: rank {rank}/{world_size}")
