@@ -158,7 +158,11 @@ class IceDataPreparer:
             #'fsens': 'fsens_h',
             #'flat': 'flat_h',
             'flwdn': 'flwdn_h',
-            'fswdn': 'fswdn_h'
+            'fswdn': 'fswdn_h',
+            'uocn': 'uocn_h',
+            'vocn': 'vocn_h',
+            'uatm': 'uatm_h',
+            'vatm': 'vatm_h'
         }
 
         # Alternative variable name mappings for different file formats
@@ -210,7 +214,13 @@ class IceDataPreparer:
 
                 if found_var:
                     data[key] = dataset.variables[found_var][:].flatten()
-                    print(f"Read {key} ({found_var}): shape {data[key].shape}")
+                    data[key] = dataset.variables[found_var][:].flatten()
+                    try:
+                        min_val = float(np.nanmin(data[key]))
+                        max_val = float(np.nanmax(data[key]))
+                        print(f"Read {key} ({found_var}): shape {data[key].shape}, min={min_val}, max={max_val}")
+                    except Exception as e:
+                        print(f"Read {key} ({found_var}): shape {data[key].shape} (min/max unavailable: {e})")
                 else:
                     available_vars = ', '.join(
                         sorted(dataset.variables.keys())[:10]

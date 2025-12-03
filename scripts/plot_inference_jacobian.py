@@ -136,24 +136,11 @@ class UfsEmulatorInferencePlotter:
             config = checkpoint["config"]
             model_config = config["model"]
         else:
-            print("No config found in checkpoint, using fallback...")
-            # Create minimal config for backward compatibility
-            config = {
-                "model": {
-                    "input_size": 14,  # Default
-                    "hidden_size": 64,
-                    "output_size": 1,
-                    "hidden_layers": 2
-                },
-                "variables": {
-                    "input_variables": [
-                        'sst', 'sss', 'tair', 'tsfc', 'hi', 'hs', 'sice',
-                        'strocnx', 'strocny', 'strairx', 'strairy',
-                        'qref', 'flwdn', 'fswdn'
-                    ],
-                    "output_variables": ['aice']
-                }
-            }
+            print("No config found in checkpoint.")
+            raise RuntimeError(
+                f"Checkpoint '{model_path}' does not contain a 'config' entry. "
+                "Please provide a checkpoint with configuration or supply a separate config."
+            )
             model_config = config["model"]
 
         # Extract variable configuration
@@ -691,7 +678,7 @@ class UfsEmulatorInferencePlotter:
 
         # Add title for output figure
         output_title = (
-            f"UfsEmulatorFFNN {output_var.upper()} - {domain.title()} Domain\n"
+            f"UfsEmulator {output_var.upper()} - {domain.title()} Domain\n"
             f"RMSE: {rmse:.3f} | Pearson r: {corr:.3f}"
         )
         plt.figtext(0.5, 0.95, output_title,

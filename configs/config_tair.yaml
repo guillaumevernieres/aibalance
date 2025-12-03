@@ -15,10 +15,14 @@ variables:
     - 'hi'        # Ice thickness
     - 'hs'        # Snow thickness
     - 'sice'      # Ice salinity
-    - 'strocnx'   # Ocean/ice stress (x)
-    - 'strocny'   # Ocean/ice stress (y)
-    - 'strairx'   # Atm/ice stress (x)
-    - 'strairy'   # Atm/ice stress (y)
+    #- 'strocnx'   # Ocean/ice stress (x)
+    #- 'strocny'   # Ocean/ice stress (y)
+    #- 'strairx'   # Atm/ice stress (x)
+    #- 'strairy'   # Atm/ice stress (y)
+    - 'uocn'
+    - 'vocn'
+    - 'uatm'
+    - 'vatm'
     - 'qref'      # 2m reference specific humidity
     - 'flwdn'     # Down longwave flux
     - 'fswdn'     # Down solar flux
