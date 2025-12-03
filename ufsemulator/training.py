@@ -43,6 +43,18 @@ class UfsEmulatorTrainer:
         self.world_size = world_size
         self.is_distributed = world_size > 1
 
+        # Set CPU threading for non-distributed training
+        if not self.is_distributed and not torch.cuda.is_available():
+            num_threads = config.get('num_threads', None)
+            if num_threads is None:
+                # Try to get from environment or use all available CPUs
+                num_threads = int(
+                    os.environ.get('OMP_NUM_THREADS', os.cpu_count() or 1)
+                )
+            torch.set_num_threads(num_threads)
+            if self.rank == 0:
+                print(f"PyTorch CPU threads: {torch.get_num_threads()}")
+
         # Setup device
         if self.is_distributed:
             # Use LOCAL_RANK for device assignment if available
