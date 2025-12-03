@@ -10,7 +10,7 @@ from pathlib import Path
 # Add the parent directory to Python path to import ufsemulator package
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ufsemulator.training import main  # noqa: E402
+from ufsemulator.training_simple import main  # noqa: E402
 
 
 if __name__ == "__main__":
