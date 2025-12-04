@@ -42,7 +42,7 @@ data:
   validation_split: 0.1
   num_workers: 0
   max_patterns: 400000  # Maximum patterns to extract from NetCDF
-  thin_fraction: 0.01   # Keep 1% of extracted patterns
+  thin_fraction: 1.0   # Keep 1% of extracted patterns
 
 training:
   epochs: 100000
@@ -74,4 +74,4 @@ training:
 output:
   model_dir: "models_aice/"
 
-use_cuda: true
+use_cuda: true  # CPU-only for HPC da-cpu partition

@@ -72,16 +72,16 @@ nc_file = 'gdas.ice.t00z.inst.f009.nc'
 if Path(nc_file).exists():
     from ufsemulator.data import IceDataPreparer
     from ufsemulator.training import load_config
-    
+
     config = load_config('config_aice.yaml')
-    
+
     preparer = IceDataPreparer(config)
-    
+
     start = time.time()
     data = preparer.read_netcdf_data(nc_file)
     nc_time = time.time() - start
     print(f"  NetCDF read: {nc_time:.3f} seconds")
-    
+
     start = time.time()
     patterns, targets, lons, lats = preparer.filter_data(data, max_patterns=10000)
     filter_time = time.time() - start

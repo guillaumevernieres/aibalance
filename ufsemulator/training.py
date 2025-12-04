@@ -1242,75 +1242,92 @@ def create_default_config() -> Dict:
     }
 
 
-def setup_distributed(rank: int, world_size: int) -> None:
-    """Initialize distributed training for HPC environments."""
+def setup_distributed(rank: int = None, world_size: int = None) -> Tuple[int, int]:
+    """
+    Initialize distributed training for HPC environments.
+
+    Returns:
+        Tuple of (rank, world_size)
+    """
     # HPC systems often set these environment variables
     if 'SLURM_PROCID' in os.environ:
         # SLURM environment
         rank = int(os.environ['SLURM_PROCID'])
         world_size = int(os.environ['SLURM_NPROCS'])
-        local_rank = int(os.environ.get(
-            'SLURM_LOCALID',
-            rank % torch.cuda.device_count() if torch.cuda.device_count() > 0 else 0
-        ))
+        local_rank = int(os.environ.get('SLURM_LOCALID', rank))
 
         # SLURM sets node list, extract master node
-        node_list = os.environ['SLURM_NODELIST']
+        node_list = os.environ.get('SLURM_NODELIST', 'localhost')
+
+        # Parse SLURM node list format
         if '[' in node_list:
-            # Handle node ranges like "node[01-04]"
+            # Handle node ranges like "node[01-04]" or "node[01,03-05]"
             base = node_list.split('[')[0]
-            first_num = node_list.split('[')[1].split('-')[0].zfill(2)
+            # Get first node number
+            ranges = node_list.split('[')[1].split(']')[0]
+            first_range = ranges.split(',')[0]
+            if '-' in first_range:
+                first_num = first_range.split('-')[0]
+            else:
+                first_num = first_range
             master_node = base + first_num
         else:
+            # Simple comma-separated list
             master_node = node_list.split(',')[0]
 
         os.environ['MASTER_ADDR'] = master_node
-        os.environ['MASTER_PORT'] = '29500'
-        os.environ['RANK'] = str(rank)
-        os.environ['WORLD_SIZE'] = str(world_size)
-        os.environ['LOCAL_RANK'] = str(local_rank)
+        os.environ['MASTER_PORT'] = os.environ.get('MASTER_PORT', '29500')
+
+        print(f"[Rank {rank}] SLURM setup: {master_node}:{os.environ['MASTER_PORT']}, "
+              f"local_rank={local_rank}")
 
     elif 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        # Manual distributed setup
+        # torchrun or manual distributed setup
         rank = int(os.environ['RANK'])
         world_size = int(os.environ['WORLD_SIZE'])
-        local_rank = int(os.environ.get(
-            'LOCAL_RANK',
-            rank % torch.cuda.device_count() if torch.cuda.device_count() > 0 else 0
-        ))
+        local_rank = int(os.environ.get('LOCAL_RANK', 0))
 
-        # Use provided MASTER_ADDR or default to localhost
+        # Ensure MASTER_ADDR and MASTER_PORT are set
         if 'MASTER_ADDR' not in os.environ:
             os.environ['MASTER_ADDR'] = 'localhost'
         if 'MASTER_PORT' not in os.environ:
             os.environ['MASTER_PORT'] = '29500'
 
     else:
-        # Single node setup
+        # Single process setup
+        if rank is None:
+            rank = 0
+        if world_size is None:
+            world_size = 1
+        local_rank = 0
         os.environ['MASTER_ADDR'] = 'localhost'
         os.environ['MASTER_PORT'] = '29500'
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            local_rank = rank % torch.cuda.device_count()
-        else:
-            local_rank = 0
 
     # Initialize the process group
-    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    if world_size > 1:
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
 
-    try:
-        dist.init_process_group(
-            backend=backend,
-            rank=rank,
-            world_size=world_size,
-            timeout=timedelta(minutes=30)  # Longer timeout for HPC
-        )
+        try:
+            dist.init_process_group(
+                backend=backend,
+                rank=rank,
+                world_size=world_size,
+                timeout=timedelta(minutes=30)  # Longer timeout for HPC
+            )
 
+            if rank == 0:
+                print(f"Distributed training initialized: {backend} backend, "
+                      f"{world_size} processes")
+                print(f"Master: {os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}")
+
+        except Exception as e:
+            print(f"[Rank {rank}] Failed to initialize distributed training: {e}")
+            raise
+    else:
         if rank == 0:
-            print(f"Distributed init: {backend}, {rank}/{world_size}")
+            print("Single-process training (no distribution)")
 
-    except Exception as e:
-        print(f"Failed to initialize distributed training: {e}")
-        raise
+    return rank, world_size
 
 
 def cleanup_distributed() -> None:
@@ -1332,8 +1349,8 @@ def train_distributed(rank: int, world_size: int, config: Dict[str, Any],
         restart_checkpoint: Path to checkpoint file for restart
         restart_from_best: Whether to restart from best_model.pt
     """
-    # Setup distributed training
-    setup_distributed(rank, world_size)
+    # Setup distributed training - now returns actual rank/world_size
+    rank, world_size = setup_distributed(rank, world_size)
 
     try:
         # Initialize trainer with distributed settings
@@ -1358,7 +1375,9 @@ def train_distributed(rank: int, world_size: int, config: Dict[str, Any],
                 train_loss=trainer.history['train_loss'],
                 val_loss=trainer.history['val_loss'],
                 learning_rate=trainer.history['learning_rate'],
-                jacobian_metrics_history=trainer.history['jacobian_metrics_history'],
+                jacobian_metrics_history=(
+                    trainer.history['jacobian_metrics_history']
+                ),
                 predictions=None,
                 targets=None
             )
@@ -1366,7 +1385,8 @@ def train_distributed(rank: int, world_size: int, config: Dict[str, Any],
 
     finally:
         # Clean up
-        cleanup_distributed()
+        if world_size > 1:
+            cleanup_distributed()
 
 
 def main() -> None:
@@ -1429,16 +1449,27 @@ def main() -> None:
 
     # Override with HPC environment variables if present (unless disabled)
     if not args.no_distributed:
-        if 'SLURM_PROCID' in os.environ:
-            rank = int(os.environ['SLURM_PROCID'])
-            world_size = int(os.environ['SLURM_NPROCS'])
+        if 'SLURM_PROCID' in os.environ and 'SLURM_NPROCS' in os.environ:
+            # SLURM automatically sets these - let setup_distributed handle it
+            rank = None  # Will be determined by setup_distributed
+            world_size = None  # Will be determined by setup_distributed
+            distributed_detected = int(os.environ['SLURM_NPROCS']) > 1
         elif 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+            # torchrun or manual setup
             rank = int(os.environ['RANK'])
             world_size = int(os.environ['WORLD_SIZE'])
+            distributed_detected = world_size > 1
+        else:
+            distributed_detected = world_size > 1
+    else:
+        # Force single-process mode
+        rank = 0
+        world_size = 1
+        distributed_detected = False
 
-    if world_size > 1:
-        print(f"Starting distributed training: rank {rank}/{world_size}")
-        # Don't use mp.spawn for HPC - processes are already spawned
+    if distributed_detected:
+        print("Distributed training detected")
+        # Call distributed training function
         train_distributed(
             rank, world_size, config, config['data']['data_path'],
             args.restart_from_checkpoint, args.restart_from_best
