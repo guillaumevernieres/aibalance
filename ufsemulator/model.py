@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 from pathlib import Path
+from typing import List, Dict
 
 
 class UfsEmulatorFFNN(nn.Module):
@@ -53,11 +54,38 @@ class UfsEmulatorFFNN(nn.Module):
         self.input_mean: torch.Tensor
         self.input_std: torch.Tensor
 
+        # TorchScript-serializable metadata for IO names and arbitrary meta
+        self.input_names: List[str] = []
+        self.output_names: List[str] = []
+        self.input_levels: List[int] = []
+        self.output_levels: List[int] = []
+        self.meta: Dict[str, str] = {}
+
         # Compute total number of parameters (degrees of freedom)
         total_params = sum(p.numel() for p in self.parameters())
         print(f"Total degrees of freedom (parameters): {total_params}")
 
         print("End UfsEmulatorFFNN constructor")
+
+    def set_io_names(self, inputs: List[str], outputs: List[str]) -> None:
+        """
+        Set input/output variable names. These will be serialized with TorchScript.
+        """
+        self.input_names = list(inputs)
+        self.output_names = list(outputs)
+
+    def set_io_levels(self, input_levels: List[int], output_levels: List[int]) -> None:
+        """
+        Set input/output vertical level indices. These will be serialized with TorchScript.
+        """
+        self.input_levels = list(input_levels)
+        self.output_levels = list(output_levels)
+
+    def set_metadata(self, kv: Dict[str, str]) -> None:
+        """
+        Set arbitrary string metadata to be serialized with TorchScript.
+        """
+        self.meta = dict(kv)
 
     def init_norm(self, mean: torch.Tensor, std: torch.Tensor) -> None:
         """
@@ -157,6 +185,24 @@ class UfsEmulatorFFNN(nn.Module):
             print(f"Buffer name: {name}, Size: {buffer.size()}")
             print(f"       values: {buffer}")
 
+    def save_torchscript(self, script_filename: str) -> None:
+        """
+        Export and save the model as a TorchScript module.
+        The scripted module will include parameters and registered buffers
+        (e.g., input_mean and input_std).
+        """
+        # Ensure the module is in eval mode for export
+        was_training = self.training
+        self.eval()
+        try:
+            scripted = torch.jit.script(self)
+            torch.jit.save(scripted, script_filename)
+            print(f"Saved TorchScript model to: {script_filename}")
+        finally:
+            # Restore original training mode
+            if was_training:
+                self.train()
+
 
 def create_ufs_emulator_ffnn(
         input_size: int, hidden_size: int, output_size: int,
@@ -180,6 +226,9 @@ if __name__ == "__main__":
         hidden_size=10,
         output_size=2,
     )
+    # Set IO names and metadata example
+    model.set_io_names(["u", "v", "t", "q"], ["du", "dv"])
+    model.set_metadata({"version": "1.0"})
     x = torch.randn(1, 4)
     print(f"Input: {x}")
     mean = torch.zeros(4)
@@ -189,4 +238,6 @@ if __name__ == "__main__":
     print(f"Output: {output}")
     jac = model.jac(x)
     print(f"Jacobian: {jac}")
+    # Example TorchScript export
+    model.save_torchscript("ufs_emulator_ffnn.pt")
     print("UfsEmulatorFFNN model test completed successfully!")

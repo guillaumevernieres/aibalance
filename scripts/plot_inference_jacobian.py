@@ -3,20 +3,20 @@
 UFS Emulator Inference and Jacobian Visualization Script
 
 This script:
-1. Reads NetCDF data with GDAS compatibility
+1. Reads NetCDF data from separate atmosphere and ocean/ice CF-1 files
 2. Runs inference with trained UfsEmulatorFFNN model
 3. Computes Jacobian matrices
 4. Creates separate Arctic/Antarctic field plots
 5. Shows input features, predictions, and Jacobian sensitivities
 
 Usage:
-    python plot_inference_jacobian.py --netcdf-file data.nc \\
+    python plot_inference_jacobian.py --atm-file atm.nc --ocean-file ocean.nc \
         --model models/best_model.pt
-    python plot_inference_jacobian.py --netcdf-file data.nc \\
+    python plot_inference_jacobian.py --atm-file atm.nc --ocean-file ocean.nc \
         --model models/best_model.pt --arctic-only
-    python plot_inference_jacobian.py --netcdf-file data.nc \\
+    python plot_inference_jacobian.py --atm-file atm.nc --ocean-file ocean.nc \
         --model models/best_model.pt --antarctic-only
-    python plot_inference_jacobian.py --netcdf-file data.nc \\
+    python plot_inference_jacobian.py --atm-file atm.nc --ocean-file ocean.nc \
         --model models/best_model.pt --global-only --global-plot
 """
 
@@ -43,7 +43,7 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 
 from ufsemulator.model import UfsEmulatorFFNN
-from ufsemulator.data import select_data, IceDataPreparer
+from ufsemulator.data import IceDataPreparer
 
 
 class UfsEmulatorInferencePlotter:
@@ -292,34 +292,19 @@ class UfsEmulatorInferencePlotter:
 
         # Get other variables flattened
         aice_flat = data["aice"].flatten()
-        sst_flat = data["sst"].flatten()
+        # Apply the same filtering used in training
+        valid_mask = mask_flat == 1
 
-        # Apply the same select_data filter used in training
-        selected_indices = []
-        for i in range(len(lats_flat)):
-            # Use simplified select_data function
-            if select_data(
-                float(mask_flat[i]),
-                float(lats_flat[i]),
-                float(aice_flat[i]),
-                float(sst_flat[i]),
-                min_ice,
-                mask_mode
-            ):
-                # Domain filtering for Arctic, Antarctic, or Global
-                lat = float(lats_flat[i])
-                #if domain.lower() == "arctic" and lat > 60.0:
-                #    selected_indices.append(i)
-                #elif domain.lower() == "antarctic" and lat < -60.0:
-                #    selected_indices.append(i)
-                #elif domain.lower() == "global":
-                #    # Include all points that pass select_data filter
-                #    selected_indices.append(i)
-                selected_indices.append(i)
+        if mask_mode == "sea_ice":
+            valid_mask = valid_mask & (aice_flat > min_ice)
+        elif mask_mode == "ocean":
+            valid_mask = valid_mask & (aice_flat < min_ice)
+        # else "both" - just use the mask as-is
+
+        selected_indices = np.where(valid_mask)[0]
 
         print(f"Selected {len(selected_indices)} points for {domain} domain "
-              f"using training filter criteria (min_ice={min_ice}, "
-              f"mask_mode={mask_mode})")
+              f"(min_ice={min_ice}, mask_mode={mask_mode})")
 
         if len(selected_indices) == 0:
             raise ValueError(f"No valid data points found for {domain} domain")
@@ -589,13 +574,15 @@ class UfsEmulatorInferencePlotter:
         domain: str,
         output_dir: str = "plots",
         use_global_projection: bool = False,
+        jacobian_vmin: Optional[float] = None,
+        jacobian_vmax: Optional[float] = None,
     ):
-        """Create two separate figures: ice concentrations and Jacobian components."""
+        """Create separate figures: one for model outputs and one per Jacobian component."""
 
         Path(output_dir).mkdir(exist_ok=True)
 
         # Choose projection based on domain and plotting option
-        if use_global_projection:
+        if domain.lower() == "global" or use_global_projection:
             projection = ccrs.PlateCarree()
             extent = [-180, 180, -90, 90]  # Global extent
         elif domain.lower() == "arctic":
@@ -625,13 +612,33 @@ class UfsEmulatorInferencePlotter:
             plot_predictions = predictions
             plot_targets = targets
 
-        # Calculate common color scale based on observed data
-        obs_min, obs_max = np.min(plot_targets), np.max(plot_targets)
+        # Keep a copy of raw target stats before masking
+        raw_tmin = float(np.nanmin(plot_targets))
+        raw_tmax = float(np.nanmax(plot_targets))
+
+        # Apply physical bounds for specific outputs (e.g., tair in Kelvin)
+        if output_var == 'tair':
+            tmin, tmax = 183.15, 333.15  # Kelvin
+            plot_targets = np.where((plot_targets < tmin) | (plot_targets > tmax), np.nan, plot_targets)
+            # Do NOT mask predictions; we want to see out-of-range predictions
+
+        # Calculate common color scale based on observed data (ignore NaNs)
+        obs_min, obs_max = np.nanmin(plot_targets), np.nanmax(plot_targets)
+        # Debug print for target bounds
+        n_valid = int(np.count_nonzero(~np.isnan(plot_targets)))
+        n_nan = int(np.isnan(plot_targets).sum())
+        print(f"[{domain}] Target (raw) range: [{raw_tmin:.3f}, {raw_tmax:.3f}] | Target (masked) range: [{obs_min:.3f}, {obs_max:.3f}] | valid={n_valid}, NaNs={n_nan}")
 
         # Extend range slightly to include predictions if they go beyond observed
-        pred_min, pred_max = np.min(plot_predictions), np.max(plot_predictions)
+        pred_min, pred_max = np.nanmin(plot_predictions), np.nanmax(plot_predictions)
         common_min = min(obs_min, pred_min)
         common_max = max(obs_max, pred_max)
+
+        # Define target-based color scale (what the user wants to match)
+        if output_var == 'aice':
+            target_vmin, target_vmax = 0.0, 1.0
+        else:
+            target_vmin, target_vmax = obs_min, obs_max
 
         # For ice concentration, always use 0-1 range for consistency
         if output_var == 'aice':
@@ -646,7 +653,7 @@ class UfsEmulatorInferencePlotter:
                 (f"UFS {output_var.upper()}\n"
                  f"Range: [{obs_min:.3f}, {obs_max:.3f}]"),
                 extent, transform, show_ice_edge=True,
-                vmin=common_min, vmax=common_max
+                vmin=target_vmin, vmax=target_vmax
             )
         else:
             self._plot_generic_field(
@@ -654,7 +661,7 @@ class UfsEmulatorInferencePlotter:
                 (f"UFS {output_var.upper()}\n"
                  f"Range: [{obs_min:.3f}, {obs_max:.3f}]"),
                 extent, transform, output_unit,
-                vmin=common_min, vmax=common_max
+                vmin=target_vmin, vmax=target_vmax
             )
 
         # 2. Predicted values (right)
@@ -663,17 +670,20 @@ class UfsEmulatorInferencePlotter:
         title = (f"Predicted {output_var.upper()}\n"
                  f"Range: [{pred_min:.3f}, {pred_max:.3f}]")
 
+        # Force predicted color scale to match target color scale
+        vmin_pred, vmax_pred = target_vmin, target_vmax
+
         if output_var == 'aice':
             self._plot_ice_concentration(
                 ax2, lons, lats, plot_predictions, plot_targets,
                 title, extent, transform, show_ice_edge=True,
-                vmin=common_min, vmax=common_max
+                vmin=vmin_pred, vmax=vmax_pred
             )
         else:
             self._plot_generic_field(
                 ax2, lons, lats, plot_predictions,
                 title, extent, transform, output_unit,
-                vmin=common_min, vmax=common_max
+                vmin=vmin_pred, vmax=vmax_pred
             )
 
         # Add title for output figure
@@ -693,16 +703,33 @@ class UfsEmulatorInferencePlotter:
         output_file = f"{output_dir}/ufs_emulator_{output_var}_{domain.lower()}.png"
         plt.savefig(output_file, dpi=150, bbox_inches="tight")
         print(f"Saved {output_var} plot: {output_file}")
+        plt.close(fig1)
 
-        # ===== FIGURE 2: JACOBIAN COMPONENTS =====
-        fig2 = plt.figure(figsize=(25, 18))
+        # ===== SEPARATE FIGURES FOR EACH JACOBIAN COMPONENT =====
+        output_var = self.output_variables[0] if self.output_variables else "output"
+        
+        jacobian_figures = []
+        for i, feature_name in enumerate(self.input_variables):
+            # Skip self-sensitivity (output variable in inputs)
+            if feature_name == output_var:
+                continue
 
-        # Helper function to create jacobian subplot
-        def create_jacobian_subplot(subplot_idx, feature_idx, feature_name):
-            if feature_idx >= 0 and feature_idx < jacobians.shape[1]:
-                sensitivity = jacobians[:, feature_idx]
+            if i >= jacobians.shape[1]:
+                continue
 
-                # Better color scaling - use percentiles or min/max if std is too small
+            # Create individual figure for this Jacobian component
+            fig_jac = plt.figure(figsize=(12, 10))
+            ax = plt.subplot(1, 1, 1, projection=projection)
+
+            sensitivity = jacobians[:, i]
+
+            # Determine color scale range
+            if jacobian_vmin is not None and jacobian_vmax is not None:
+                # Use user-provided bounds
+                vmin, vmax = jacobian_vmin, jacobian_vmax
+                print(f"Using user-specified Jacobian bounds: [{vmin}, {vmax}]")
+            else:
+                # Auto-scale based on data
                 std_val = np.std(sensitivity)
                 min_val, max_val = np.min(sensitivity), np.max(sensitivity)
 
@@ -717,103 +744,48 @@ class UfsEmulatorInferencePlotter:
                 else:  # For very small values, use actual range
                     vmin, vmax = min_val, max_val
 
-                ax = plt.subplot(3, 5, subplot_idx, projection=projection)
-                ax.set_extent(extent, crs=ccrs.PlateCarree())
-                ax.add_feature(cfeature.COASTLINE, alpha=0.5)
-                ax.add_feature(cfeature.LAND, alpha=0.3, color="lightgray")
-                ax.gridlines(draw_labels=True, alpha=0.3)
+            # Set up map
+            ax.set_extent(extent, crs=ccrs.PlateCarree())
+            ax.add_feature(cfeature.COASTLINE, alpha=0.5)
+            ax.add_feature(cfeature.LAND, alpha=0.3, color="lightgray")
+            ax.gridlines(draw_labels=True, alpha=0.3)
 
-                # Debug info for troubleshooting
-                print(f"Jacobian {feature_name}: range=[{min_val:.6f}, {max_val:.6f}], "
-                      f"std={std_val:.6f}, vmin={vmin:.6f}, vmax={vmax:.6f}")
+            # Debug info
+            min_val, max_val = np.min(sensitivity), np.max(sensitivity)
+            print(f"Jacobian d{output_var}/d{feature_name}: "
+                  f"range=[{min_val:.6f}, {max_val:.6f}], "
+                  f"colorbar=[{vmin:.6f}, {vmax:.6f}]")
 
-                scatter = ax.scatter(
-                    lons, lats, c=sensitivity, s=1.0,  # Increased point size
-                    cmap=self.create_colormap("jacobian"),
-                    transform=transform, vmin=vmin, vmax=vmax, alpha=0.7
-                )
+            # Plot scatter
+            scatter = ax.scatter(
+                lons, lats, c=sensitivity, s=1.5,
+                cmap=self.create_colormap("jacobian"),
+                transform=transform, vmin=vmin, vmax=vmax, alpha=0.7
+            )
 
-                # Get the output variable name for proper labeling
-                output_var = self.output_variables[0]  # Use first output
+            # Add title
+            title_text = (f"d{output_var}/d{feature_name}\n"
+                         f"Data range: [{min_val:.2e}, {max_val:.2e}]\n"
+                         f"Colorbar: [{vmin:.2e}, {vmax:.2e}]")
+            
+            plt.title(title_text, fontsize=14, fontweight='bold', pad=20)
 
-                # Add title as text box inside the plot
-                title_text = (f"d{output_var}/d{feature_name.lower()}\n"
-                             f"range: [{min_val:.2e}, {max_val:.2e}]")
-                ax.text(0.02, 0.98, title_text, transform=ax.transAxes,
-                       fontsize=9, fontweight='bold',
-                       verticalalignment='top',
-                       bbox=dict(boxstyle='round,pad=0.3',
-                               facecolor='white', alpha=0.8))
+            # Add colorbar
+            cbar = plt.colorbar(scatter, ax=ax, shrink=0.6, pad=0.05)
+            cbar.set_label(f"d{output_var}/d{feature_name}", fontsize=12)
 
-                plt.colorbar(scatter, ax=ax, shrink=0.3,
-                           label=f"d{output_var}/d{feature_name.lower()}")
-            else:
-                # Show placeholder if feature not available
-                ax = plt.subplot(3, 5, subplot_idx, projection=projection)
-                ax.set_extent(extent, crs=ccrs.PlateCarree())
-                ax.add_feature(cfeature.COASTLINE, alpha=0.5)
-                ax.add_feature(cfeature.LAND, alpha=0.3, color="lightgray")
-                ax.gridlines(draw_labels=True, alpha=0.3)
-                # Add title as text box instead of axis title
-                ax.text(0.02, 0.98, f"{feature_name} not available",
-                       transform=ax.transAxes, fontsize=10,
-                       fontweight='bold', verticalalignment='top',
-                       bbox=dict(boxstyle='round,pad=0.3',
-                               facecolor='white', alpha=0.8))
-                ax.text(0.5, 0.5, f'No {feature_name}',
-                       transform=ax.transAxes,
-                       ha='center', va='center', fontsize=12,
-                       bbox=dict(boxstyle='round', facecolor='wheat',
-                               alpha=0.8))
+            plt.tight_layout()
 
-        # Create Jacobian subplots dynamically based on input variables
-        n_vars = len(self.input_variables)
+            # Save individual Jacobian plot
+            jac_output_file = (f"{output_dir}/jacobian_"
+                              f"d{output_var}_d{feature_name}_{domain.lower()}.png")
+            plt.savefig(jac_output_file, dpi=150, bbox_inches="tight")
+            print(f"Saved Jacobian plot: {jac_output_file}")
+            
+            jacobian_figures.append(fig_jac)
+            plt.close(fig_jac)
 
-        # Calculate grid dimensions
-        if n_vars <= 5:
-            rows, cols = 1, n_vars
-        elif n_vars <= 10:
-            rows, cols = 2, 5
-        else:
-            rows, cols = 3, 5
-
-        for i, var_name in enumerate(self.input_variables):
-            subplot_idx = i + 1  # subplot indices start from 1
-            create_jacobian_subplot(subplot_idx, i, var_name)
-
-        # Fill remaining slots with empty plots if needed
-        total_slots = rows * cols
-        if len(self.input_variables) < total_slots:
-            for empty_idx in range(len(self.input_variables) + 1,
-                                   total_slots + 1):
-                ax = plt.subplot(rows, cols, empty_idx, projection=projection)
-                ax.set_extent(extent, crs=ccrs.PlateCarree())
-                ax.add_feature(cfeature.COASTLINE, alpha=0.5)
-                ax.add_feature(cfeature.LAND, alpha=0.3, color="lightgray")
-                ax.gridlines(draw_labels=True, alpha=0.3)
-                ax.text(0.5, 0.5, 'Empty', transform=ax.transAxes,
-                       ha='center', va='center', fontsize=12,
-                       bbox=dict(boxstyle='round', facecolor='lightgray',
-                               alpha=0.5))
-
-        # Add title for Jacobian figure
-        jac_title = (
-            f"UfsEmulatorFFNN Jacobian Sensitivity - {domain.title()} Domain"
-        )
-        plt.figtext(0.5, 0.95, jac_title,
-                   fontsize=14, fontweight="bold",
-                   horizontalalignment='center',
-                   bbox=dict(boxstyle='round,pad=0.5',
-                           facecolor='white', alpha=0.8))
-
-        plt.tight_layout()
-
-        # Save Jacobian plot
-        jac_output_file = f"{output_dir}/ufs_emulator_jacobian_{domain.lower()}.png"
-        plt.savefig(jac_output_file, dpi=150, bbox_inches="tight")
-        print(f"Saved Jacobian plot: {jac_output_file}")
-
-        return fig1, fig2
+        return fig1, jacobian_figures
 
     def create_summary_statistics(
         self,
@@ -917,7 +889,10 @@ def main():
         description="UFS Emulator Inference and Jacobian Visualization"
     )
     parser.add_argument(
-        "--netcdf-file", required=True, help="Input NetCDF file"
+        "--atm-file", required=True, help="Atmosphere NetCDF file (CF-1)"
+    )
+    parser.add_argument(
+        "--ocean-file", required=True, help="Ocean/Ice NetCDF file (CF-1)"
     )
     parser.add_argument(
         "--model", required=True, help="Trained model file (.pt)"
@@ -943,14 +918,23 @@ def main():
         "--global-plot", action="store_true",
         help="Use global projection instead of polar stereographic"
     )
+    parser.add_argument(
+        "--jacobian-vmin", type=float, default=None,
+        help="Minimum value for Jacobian colorbar (default: auto-scale)"
+    )
+    parser.add_argument(
+        "--jacobian-vmax", type=float, default=None,
+        help="Maximum value for Jacobian colorbar (default: auto-scale)"
+    )
 
     args = parser.parse_args()
 
     # Initialize plotter
     plotter = UfsEmulatorInferencePlotter(args.model, args.config)
 
-    # Read NetCDF data
-    data = plotter.read_netcdf_data(args.netcdf_file)
+    # Read NetCDF data pair using the same logic as training
+    preparer = IceDataPreparer(plotter.config)
+    data = preparer.read_netcdf_data_pair(args.atm_file, args.ocean_file)
 
     # Determine domains to process
     domains = []
@@ -989,8 +973,8 @@ def main():
             # Run inference and compute Jacobians on thinned data
             predictions, jacobians = plotter.run_inference(features)
 
-            # Create plots
-            fig1, fig2 = plotter.plot_domain_fields(
+            # Create plots with configurable Jacobian bounds
+            fig1, jac_figs = plotter.plot_domain_fields(
                 features,
                 targets,
                 predictions,
@@ -1000,6 +984,8 @@ def main():
                 domain,
                 args.output_dir,
                 args.global_plot,
+                args.jacobian_vmin,
+                args.jacobian_vmax,
             )
 
             # Print statistics
@@ -1007,8 +993,7 @@ def main():
                 predictions, targets, jacobians, features, domain
             )
 
-            plt.close(fig1)  # Free memory
-            plt.close(fig2)  # Free memory
+            # Figures already closed in plot_domain_fields
 
         except Exception as e:
             print(f"❌ Error processing {domain} domain: {e}")

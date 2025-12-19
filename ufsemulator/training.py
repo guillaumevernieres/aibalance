@@ -886,12 +886,17 @@ class UfsEmulatorTrainer:
 
                 rmse = np.sqrt(np.mean((pred_valid - targ_valid) ** 2))
                 bias = np.mean(pred_valid - targ_valid)
-                axes[1, 1].text(0.05, 0.95, f'RMSE: {rmse:.4f}\nBias: {bias:.4f}',
+                # Linear regression coefficient (slope of Pred vs Target)
+                slope = np.polyfit(targ_valid, pred_valid, 1)[0] if targ_valid.size > 1 else float('nan')
+                axes[1, 1].text(0.05, 0.95, f'RMSE: {rmse:.4f}\nBias: {bias:.4f}\nSlope: {slope:.4f}',
                                 transform=axes[1, 1].transAxes, verticalalignment='top',
                                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
-                axes[1, 1].set_xlabel('Target Ice Concentration')
-                axes[1, 1].set_ylabel('Predicted Ice Concentration')
+                # Dynamic axis labels based on configured output variable
+                out_vars = self.config.get('variables', {}).get('output_variables', ['target'])
+                tgt_label = out_vars[0] if isinstance(out_vars, list) and len(out_vars) > 0 else 'target'
+                axes[1, 1].set_xlabel(tgt_label)
+                axes[1, 1].set_ylabel(f'Predicted {tgt_label}')
                 axes[1, 1].set_title('Target vs Prediction')
                 axes[1, 1].legend()
                 axes[1, 1].grid(True, alpha=0.3)
@@ -1426,6 +1431,14 @@ def main() -> None:
         config['data']['data_path'] = args.data_path
     elif args.netcdf_file:
         config['data']['data_path'] = args.netcdf_file
+
+    # NEW: support CF-1 pair files (atm + ocean) used by data.py
+    data_cfg = config.setdefault('data', {})
+    atm_file = data_cfg.get('atm_file')
+    ocean_file = data_cfg.get('ocean_file')
+    if atm_file and ocean_file and 'data_path' not in data_cfg:
+        # Use atmosphere file for existence check; data pipeline will read both
+        data_cfg['data_path'] = atm_file
 
     # Create sample data if requested
     if args.create_data:

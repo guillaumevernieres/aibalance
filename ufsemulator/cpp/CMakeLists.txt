@@ -4,11 +4,12 @@ project(ufs_emulator_cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Use Torch from the Python wheel installation
-# Update TORCH_ROOT if your environment differs
-set(TORCH_ROOT
-    "/home/gvernier/anaconda3/lib/python3.9/site-packages/torch"
-)
+# Use Torch from an external path passed via -DTORCH_ROOT=...</>
+# Example: cmake -DTORCH_ROOT=/path/to/torch -B build -S .
+if(NOT DEFINED TORCH_ROOT)
+  message(FATAL_ERROR "TORCH_ROOT not set. Pass -DTORCH_ROOT=/path/to/python/site-packages/torch")
+endif()
+message(STATUS "Using TORCH_ROOT: ${TORCH_ROOT}")
 
 # Include and library directories
 include_directories(
@@ -43,5 +44,5 @@ set_tests_properties(ufs_emulator_usage PROPERTIES
   PASS_REGULAR_EXPRESSION "Usage: .*ufs_emulator.* <model.ts> <input_size>"
 )
 
-message(STATUS "Torch include dirs: ${TORCH_INCLUDE_DIRS}")
-message(STATUS "Torch libraries: ${TORCH_LIBRARIES}")
+message(STATUS "Torch include dirs: ${TORCH_ROOT}/include;${TORCH_ROOT}/include/torch/csrc/api/include")
+message(STATUS "Torch libraries dir: ${TORCH_ROOT}/lib")
