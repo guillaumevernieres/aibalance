@@ -217,30 +217,22 @@ class UfsEmulatorTrainer:
             inputs = torch.FloatTensor(data['inputs'])
             targets = torch.FloatTensor(data['targets'])
 
-            # Use saved normalization stats if available
-            if 'input_mean' in data and 'input_std' in data:
-                input_mean = torch.tensor(
-                    data['input_mean'], dtype=torch.float32
-                )
-                input_std = torch.tensor(
-                    data['input_std'], dtype=torch.float32
-                )
-            else:
-                # Compute normalization statistics (distributed if needed)
-                input_mean, input_std = self._compute_distributed_stats(inputs)
+            # Load normalization stats
+            input_mean = torch.tensor(data['input_mean'], dtype=torch.float32)
+            input_std = torch.tensor(data['input_std'], dtype=torch.float32)
+            output_mean = torch.tensor(data['output_mean'], dtype=torch.float32)
+            output_std = torch.tensor(data['output_std'], dtype=torch.float32)
 
         elif data_path.endswith('.pt'):
             data = torch.load(data_path)
             inputs = data['inputs']
             targets = data['targets']
 
-            # Use saved normalization stats if available
-            if 'input_mean' in data and 'input_std' in data:
-                input_mean = data['input_mean']
-                input_std = data['input_std']
-            else:
-                # Compute normalization statistics (distributed if needed)
-                input_mean, input_std = self._compute_distributed_stats(inputs)
+            # Load normalization stats
+            input_mean = data['input_mean']
+            input_std = data['input_std']
+            output_mean = data['output_mean']
+            output_std = data['output_std']
         else:
             raise ValueError(f"Unsupported data format: {data_path}")
 
@@ -252,16 +244,21 @@ class UfsEmulatorTrainer:
             input_std,
             torch.ones_like(input_std)
         )
+        output_std = torch.where(
+            output_std > 1e-6,
+            output_std,
+            torch.ones_like(output_std)
+        )
 
-        # Initialize model normalization
+        # Initialize model normalization (both input and output)
         if hasattr(self.model, 'module'):  # DDP wrapped model
             ddp_model = cast(DDP, self.model)
             assert hasattr(ddp_model.module, 'init_norm')
-            ddp_model.module.init_norm(input_mean, input_std)
+            ddp_model.module.init_norm(input_mean, input_std, output_mean, output_std)
         else:
             emulator_model = cast(UfsEmulatorFFNN, self.model)
             assert hasattr(emulator_model, 'init_norm')
-            emulator_model.init_norm(input_mean, input_std)
+            emulator_model.init_norm(input_mean, input_std, output_mean, output_std)
 
         # Save normalization once (not per checkpoint)
         if self.rank == 0:
@@ -276,8 +273,13 @@ class UfsEmulatorTrainer:
                 emulator_model = cast(UfsEmulatorFFNN, self.model)
                 emulator_model.save_norm(str(norm_path))
 
-        # Create dataset
-        dataset = TensorDataset(inputs, targets)
+        # Normalize inputs and targets for training
+        # The model's forward() method now expects normalized inputs
+        inputs_normalized = (inputs - input_mean) / input_std
+        targets_normalized = (targets - output_mean) / output_std
+
+        # Create dataset with normalized data
+        dataset = TensorDataset(inputs_normalized, targets_normalized)
 
         # Split into train/validation
         val_size = int(len(dataset) * self.config['data']['validation_split'])

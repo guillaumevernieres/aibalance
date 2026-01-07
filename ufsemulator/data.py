@@ -150,7 +150,10 @@ class IceDataPreparer:
         data = self.read_netcdf_data_pair(atm_file, ocn_file)
         patterns, targets, lons, lats = self.filter_data(data, max_patterns)
         patterns, targets, lons, lats = self.thin_patterns(patterns, targets, lons, lats, thin_fraction)
+
+        # Compute normalization statistics for both inputs and outputs
         input_mean, input_std = self.compute_normalization_stats(patterns)
+        output_mean, output_std = self.compute_normalization_stats(targets)
 
         # Create CF-1 standard name mappings for DA system
         # Atmospheric variables use nlevs-1 (stored from read), ocean variables use 0
@@ -190,6 +193,7 @@ class IceDataPreparer:
         result = {
             'inputs': patterns, 'targets': targets, 'lons': lons, 'lats': lats,
             'input_mean': input_mean, 'input_std': input_std,
+            'output_mean': output_mean, 'output_std': output_std,
             'metadata': {
                 'n_patterns': len(patterns),
                 'input_features': self.input_variables,

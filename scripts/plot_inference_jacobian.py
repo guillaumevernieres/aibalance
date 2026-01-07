@@ -164,24 +164,24 @@ class UfsEmulatorInferencePlotter:
         model.eval()
 
         # Load normalization parameters
-        try:
-            norm_path = Path(model_path).parent / "normalization.pt"
-            if norm_path.exists():
-                moments = torch.load(norm_path, map_location=self.device, weights_only=False)
-                model.input_mean.data = moments[0]
-                model.input_std.data = moments[1]
-                print(f"✅ Loaded normalization from: {norm_path}")
-            else:
-                print("⚠️ No normalization file found, trying model.load_norm...")
-                model.load_norm(model_path)
+        norm_path = Path(model_path).parent / "normalization.pt"
+        if not norm_path.exists():
+            raise FileNotFoundError(
+                f"Normalization file not found: {norm_path}\n"
+                f"Please ensure normalization.pt exists in the model directory."
+            )
 
-        except Exception as e:
-            print(f"Warning: Could not load normalization: {e}")
-            print("Using default normalization (mean=0, std=1)")
-            # Set default normalization
-            input_size = model_config["input_size"]
-            model.input_mean.data = torch.zeros(input_size)
-            model.input_std.data = torch.ones(input_size)
+        print(f"Loading normalization from: {norm_path}")
+        moments = torch.load(norm_path, map_location=self.device, weights_only=False)
+
+        # New dict format with all four normalization parameters
+        model.input_mean.data = moments['input_mean']
+        model.input_std.data = moments['input_std']
+        model.output_mean.data = moments['output_mean']
+        model.output_std.data = moments['output_std']
+
+        print(f"✅ Loaded normalization (input_mean: {model.input_mean.mean().item():.4f}, "
+              f"output_mean: {model.output_mean.mean().item():.4f})")
 
         print("✅ Model loaded successfully")
         return model, config
@@ -376,28 +376,21 @@ class UfsEmulatorInferencePlotter:
         features_tensor = torch.FloatTensor(features).to(self.device)
 
         with torch.no_grad():
-            # Forward pass
-            predictions = self.model(features_tensor)
+            # Forward pass using predict() for physical-space output
+            predictions = self.model.predict(features_tensor)
             predictions = predictions.cpu().numpy().flatten()
 
         print("Computing Jacobians...")
         jacobians = []
 
-        # Compute Jacobian for each sample
+        # Compute Jacobian for each sample using jac_physical()
         for i in range(len(features)):
             sample = features_tensor[i:i + 1]  # Single sample
-            sample.requires_grad_(True)
 
-            # Forward pass
-            output = self.model(sample)
-
-            # Compute gradients
-            output.backward()
-            jac = sample.grad.cpu().numpy().flatten()
+            # Compute physical-space Jacobian
+            jac_phys = self.model.jac_physical(sample)  # [1, output_size, input_size]
+            jac = jac_phys.cpu().numpy().flatten()
             jacobians.append(jac)
-
-            # Clear gradients
-            sample.grad = None
 
         jacobians = np.array(jacobians)
 
@@ -543,7 +536,7 @@ class UfsEmulatorInferencePlotter:
 
         # Choose appropriate colormap and scaling
         if vmin is None or vmax is None:
-            vmin, vmax = np.min(field_data), np.max(field_data)
+            vmin, vmax = - 0.5*np.std(field_data), 0.5*np.std(field_data)
 
         # Main scatter plot
         scatter = ax.scatter(
@@ -707,7 +700,7 @@ class UfsEmulatorInferencePlotter:
 
         # ===== SEPARATE FIGURES FOR EACH JACOBIAN COMPONENT =====
         output_var = self.output_variables[0] if self.output_variables else "output"
-        
+
         jacobian_figures = []
         for i, feature_name in enumerate(self.input_variables):
             # Skip self-sensitivity (output variable in inputs)
@@ -738,7 +731,7 @@ class UfsEmulatorInferencePlotter:
 
                 # Choose appropriate range
                 if std_val > 1e-8:  # If std is reasonable, use 2*std
-                    vmin, vmax = -2*std_val, 2*std_val
+                    vmin, vmax = 0, 2  #-0.5*std_val, 0.5*std_val
                 elif max_val - min_val > 1e-8:  # If range is reasonable, use percentiles
                     vmin, vmax = p5, p95
                 else:  # For very small values, use actual range
@@ -757,17 +750,21 @@ class UfsEmulatorInferencePlotter:
                   f"colorbar=[{vmin:.6f}, {vmax:.6f}]")
 
             # Plot scatter
+            #scatter = ax.scatter(
+            #    lons, lats, c=sensitivity, s=1.5,
+            #    cmap=self.create_colormap("jacobian"),
+            #    transform=transform, vmin=vmin, vmax=vmax, alpha=0.7
             scatter = ax.scatter(
                 lons, lats, c=sensitivity, s=1.5,
-                cmap=self.create_colormap("jacobian"),
-                transform=transform, vmin=vmin, vmax=vmax, alpha=0.7
+                cmap='RdBu_r',
+                transform=transform, vmin=vmin, vmax=vmax, alpha=1
             )
 
             # Add title
             title_text = (f"d{output_var}/d{feature_name}\n"
                          f"Data range: [{min_val:.2e}, {max_val:.2e}]\n"
                          f"Colorbar: [{vmin:.2e}, {vmax:.2e}]")
-            
+
             plt.title(title_text, fontsize=14, fontweight='bold', pad=20)
 
             # Add colorbar
@@ -781,7 +778,7 @@ class UfsEmulatorInferencePlotter:
                               f"d{output_var}_d{feature_name}_{domain.lower()}.png")
             plt.savefig(jac_output_file, dpi=150, bbox_inches="tight")
             print(f"Saved Jacobian plot: {jac_output_file}")
-            
+
             jacobian_figures.append(fig_jac)
             plt.close(fig_jac)
 

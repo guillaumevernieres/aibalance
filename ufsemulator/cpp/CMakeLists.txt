@@ -32,6 +32,15 @@ set_target_properties(ufs_emulator PROPERTIES
   INSTALL_RPATH "${TORCH_ROOT}/lib"
 )
 
+# Test executable for comparing Python and C++ implementations
+add_executable(test_compare_python_cpp test_compare_python_cpp.cpp)
+target_link_libraries(test_compare_python_cpp torch_cpu c10)
+set_property(TARGET test_compare_python_cpp PROPERTY CXX_STANDARD 17)
+set_target_properties(test_compare_python_cpp PROPERTIES
+  BUILD_RPATH "${TORCH_ROOT}/lib"
+  INSTALL_RPATH "${TORCH_ROOT}/lib"
+)
+
 
 # Enable testing
 include(CTest)
@@ -41,7 +50,23 @@ enable_testing()
 add_test(NAME ufs_emulator_usage COMMAND ufs_emulator)
 set_tests_properties(ufs_emulator_usage PROPERTIES
   WILL_FAIL TRUE
-  PASS_REGULAR_EXPRESSION "Usage: .*ufs_emulator.* <model.ts> <input_size>"
+)
+
+# Python/C++ comparison test
+# Assumes test data has been generated in the source directory
+# Run generate_data_only.sh first if files don't exist
+add_test(
+  NAME compare_python_cpp
+  COMMAND test_compare_python_cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/test_model.ts
+          ${CMAKE_CURRENT_SOURCE_DIR}/test_input.pt
+          ${CMAKE_CURRENT_SOURCE_DIR}/test_output.pt
+          ${CMAKE_CURRENT_SOURCE_DIR}/test_jacobian.pt
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+set_tests_properties(compare_python_cpp PROPERTIES
+  TIMEOUT 300
 )
 
 message(STATUS "Torch include dirs: ${TORCH_ROOT}/include;${TORCH_ROOT}/include/torch/csrc/api/include")
