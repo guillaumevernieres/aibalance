@@ -1,0 +1,39 @@
+states to structured grid:
+- state geometry:
+    geom_grid_file: soca/fix/geomouter/soca_gridspec.nc
+    mom6_input_nml: soca/fix/geomouter/input.nml
+    fields metadata: soca/fix/fields_metadata_coupled.yml
+
+  state:
+    read_from_file: 1
+    date: 2025-08-03T00:00:00Z
+    basename: soca/bkg/
+    ice_filename: gdas.ice.t18z.inst.f006.nc
+    ocn_filename: gdas.ocean.t18z.inst.f006.nc
+    state variables:
+    - sea_surface_height_above_geoid
+    - sea_water_potential_temperature
+    - sea_water_salinity
+    - sea_water_cell_thickness
+    - sea_ice_area_fraction
+    - sea_ice_thickness
+    - sea_ice_snow_thickness
+    - sea_water_depth
+
+  structured grid interpolation:
+    grid type: regular gaussian
+    local interpolator type: atlas interpolator
+    interpolation method:
+      type: finite-element
+    number of latitude gridpoints: 192
+    variables to output:
+    - sea_water_potential_temperature
+    - sea_water_salinity
+    - sea_ice_area_fraction
+    - sea_ice_thickness
+    - sea_ice_snow_thickness
+    - sea_water_cell_thickness
+    all model levels: true
+    #bottom model level: false
+    datapath: ./
+    prefix: ocean_ice_gauss
