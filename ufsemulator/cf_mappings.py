@@ -13,7 +13,8 @@ CF_ATM = {
     'uatm': 'eastward_wind',
     'vatm': 'northward_wind',
     'tsfc': 'skin_temperature_at_surface',
-    'qref': 'water_vapor_mixing_ratio_wrt_moist_air'
+    'qref': 'water_vapor_mixing_ratio_wrt_moist_air',
+    'pressfc': 'air_pressure_at_surface'
 }
 
 # Ocean/ice variable mappings (short name -> CF-1 standard name)
@@ -26,9 +27,17 @@ CF_OCN = {
     'hi': 'sea_ice_thickness',
     'hs': 'sea_ice_snow_thickness',
     'thick': 'sea_water_cell_thickness',
+    'h': 'h',        # MOM6 layer thickness (alternative name)
     'sice': 'sea_ice_salinity',
     'uocn': 'eastward_sea_water_velocity',
-    'vocn': 'northward_sea_water_velocity'
+    'vocn': 'northward_sea_water_velocity',
+    'Temp': 'Temp',  # MOM6 temperature variable name
+    'Salt': 'Salt',  # MOM6 salinity variable name
+    'uo': 'uo',      # UFS ocean x-velocity
+    'vo': 'vo',      # UFS ocean y-velocity
+    'so': 'so',      # UFS salinity
+    'temp': 'temp',  # UFS temperature
+    'ho': 'ho',      # UFS layer thickness
 }
 
 # Default atmospheric level index for fallback

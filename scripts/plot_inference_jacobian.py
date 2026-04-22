@@ -62,56 +62,6 @@ class UfsEmulatorInferencePlotter:
         self.input_units = {}
         self.output_units = {}
 
-        # Variable mappings (same as in data.py)
-        self.var_names = {
-            "lat": "ULAT",
-            "lon": "ULON",
-            "aice": "aice_h",
-            "tsfc": "Tsfc_h",
-            "sst": "sst_h",
-            "sss": "sss_h",
-            "sice": "sice_h",
-            "hi": "hi_h",
-            "hs": "hs_h",
-            "mask": "umask",
-            "tair": "Tair_h",
-            "frzmlt": "frzmlt_h",
-            # Ice temperatures
-            "sitempbot": "sitempbot_h",
-            "sitempsnic": "sitempsnic_h",
-            "sitemptop": "sitemptop_h",
-            # Ocean/ice stresses
-            "strocnx": "strocnx_h",
-            "strocny": "strocny_h",
-            # Atmosphere/ice stresses
-            "strairx": "strairx_h",
-            "strairy": "strairy_h",
-            # Heat and flux variables
-            "fhocn": "fhocn_h",
-            "qref": "Qref_h",
-            "flwup": "flwup_h",
-            "fsens": "fsens_h",
-            "flat": "flat_h",
-            "flwdn": "flwdn_h",
-            "fswdn": "fswdn_h",
-        }
-
-        # Alternative variable names for GDAS compatibility
-        self.alt_var_names = {
-            "aice_h": ["aice", "ice_concentration", "aicen"],
-            "hi_h": ["hi", "ice_thickness", "hicen"],
-            "hs_h": ["hs", "snow_thickness", "hsnon"],
-            "Tair_h": ["tair", "air_temperature"],
-            "Tsfc_h": ["tsfc", "surface_temperature"],
-            "sst_h": ["sst", "sea_surface_temperature"],
-            "sss_h": ["sss", "sea_surface_salinity"],
-            "sice_h": ["sice", "ice_salinity"],
-            "frzmlt_h": ["frzmlt", "frazil_melt", "frazil_ice_melt"],
-            "ULAT": ["lat", "latitude"],
-            "ULON": ["lon", "longitude"],
-            "umask": ["mask", "land_mask"],
-        }
-
         # Load model and extract configuration from checkpoint
         self.model, self.config = self._load_model_and_config(
             model_path, config_path
@@ -220,56 +170,6 @@ class UfsEmulatorInferencePlotter:
         print(f"Output variables ({len(self.output_variables)}): "
               f"{self.output_variables}")
 
-    def read_netcdf_data(self, filename: str) -> Dict[str, np.ndarray]:
-        """Read NetCDF data with variable name fallback."""
-        print(f"Reading NetCDF file: {filename}")
-
-        with nc.Dataset(filename, "r") as dataset:
-            data = {}
-
-            for key, var_name in self.var_names.items():
-                found_var = None
-
-                # Try primary variable name
-                if var_name in dataset.variables:
-                    found_var = var_name
-                else:
-                    # Try alternative names
-                    alt_names = self.alt_var_names.get(var_name, [])
-                    for alt_name in alt_names:
-                        if alt_name in dataset.variables:
-                            found_var = alt_name
-                            print(
-                                f"Using alternative: "
-                                f"{var_name} -> {alt_name}"
-                            )
-                            break
-
-                if found_var:
-                    var_data = dataset.variables[found_var][:]
-                    # Handle time dimension if present
-                    if var_data.ndim == 3:  # (time, lat, lon)
-                        var_data = var_data[0]  # Take first time step
-                    data[key] = var_data
-                    print(f"Read {key}: shape {data[key].shape}")
-                else:
-                    # Handle missing variables gracefully for optional features
-                    optional_vars = ["frzmlt", "sice", "hs", "sitempbot", "sitempsnic",
-                                   "sitemptop", "strocnx", "strocny", "strairx", "strairy",
-                                   "fhocn", "qref", "flwup", "fsens", "flat", "flwdn", "fswdn"]
-                    if key in optional_vars:  # Optional features
-                        print(f"⚠️ Optional variable {var_name} not found - will use zeros if needed")
-                        # Don't add to data dict - will be handled in feature extraction
-                    else:
-                        # Required variables (coordinates, basic fields)
-                        available_vars = list(dataset.variables.keys())[:10]
-                        raise KeyError(
-                            f"Required variable {var_name} not found. "
-                            f"Available: {available_vars}"
-                        )
-
-        return data
-
     def filter_domain(
         self, data: Dict[str, np.ndarray], domain: str = "arctic",
         min_ice: Optional[float] = None, mask_mode: Optional[str] = None
@@ -281,6 +181,7 @@ class UfsEmulatorInferencePlotter:
                 'min_ice_concentration', 0.0)
         if mask_mode is None:
             mask_mode = self.config.get('domain', {}).get('mask_mode', 'both')
+
         lats = data["lat"]
         lons = data["lon"]
         mask = data["mask"]
@@ -290,8 +191,11 @@ class UfsEmulatorInferencePlotter:
         lons_flat = lons.flatten()
         mask_flat = mask.flatten()
 
-        # Get other variables flattened
+        # Get aice for masking (required for mask_mode filtering)
+        if "aice" not in data:
+            raise ValueError("'aice' (sea ice concentration) is required for domain filtering but not found in data")
         aice_flat = data["aice"].flatten()
+
         # Apply the same filtering used in training
         valid_mask = mask_flat == 1
 
@@ -325,14 +229,10 @@ class UfsEmulatorInferencePlotter:
                 features.append(var_data)
                 print(f"✅ Added input {var_name}, shape: {var_data.shape}")
             else:
-                # Handle missing features by filling with zeros
-                print(f"⚠️ Input {var_name} not found in data - "
-                      f"filling with zeros")
-                n_points = np.sum(domain_mask)
-                zero_data = np.zeros(n_points)
-                features.append(zero_data)
-                print(f"✅ Added zero-filled input {var_name}, "
-                      f"shape: {zero_data.shape}")
+                raise ValueError(
+                    f"Required input variable '{var_name}' not found in data. "
+                    f"Available variables: {list(data.keys())}"
+                )
 
         if len(features) == 0:
             raise ValueError("No features were successfully extracted")
@@ -348,9 +248,10 @@ class UfsEmulatorInferencePlotter:
                 targets.append(target_data)
                 print(f"✅ Added target {var_name}, shape: {target_data.shape}")
             else:
-                print(f"⚠️ Target {var_name} not found - using zeros")
-                n_points = np.sum(domain_mask)
-                targets.append(np.zeros(n_points))
+                raise ValueError(
+                    f"Required output variable '{var_name}' not found in data. "
+                    f"Available variables: {list(data.keys())}"
+                )
 
         if len(targets) == 1:
             targets = targets[0]  # Single output - keep as 1D
@@ -731,7 +632,7 @@ class UfsEmulatorInferencePlotter:
 
                 # Choose appropriate range
                 if std_val > 1e-8:  # If std is reasonable, use 2*std
-                    vmin, vmax = 0, 2  #-0.5*std_val, 0.5*std_val
+                    vmin, vmax = -3*std_val, 3*std_val
                 elif max_val - min_val > 1e-8:  # If range is reasonable, use percentiles
                     vmin, vmax = p5, p95
                 else:  # For very small values, use actual range

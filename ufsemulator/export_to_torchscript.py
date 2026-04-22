@@ -53,7 +53,13 @@ def export_model(checkpoint_path: str, output_path: str):
     )
 
     # Load model weights
-    model.load_state_dict(checkpoint["model_state_dict"])
+    # Use strict=False to handle older checkpoints that may be missing new buffers
+    # like mask_threshold (added for ancillary field masking)
+    missing_keys = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    if missing_keys.missing_keys:
+        print(f"  Note: Missing keys in checkpoint (using defaults): {missing_keys.missing_keys}")
+    if missing_keys.unexpected_keys:
+        print(f"  Warning: Unexpected keys in checkpoint: {missing_keys.unexpected_keys}")
 
     # Load normalization parameters
     checkpoint_dir = Path(checkpoint_path).parent
@@ -97,20 +103,25 @@ def export_model(checkpoint_path: str, output_path: str):
         print("\n⚠️  WARNING: CF-1 mappings not found in checkpoint metadata.")
         print("   Generating fallback mappings using cf_mappings module.")
         print("   For production, retrain the model with updated training code.\n")
-        
+
         # Get atmospheric level from config
         domain_cfg = config.get('domain', {})
-        atm_level = domain_cfg.get('atm_level_index', 127)  # Default for 128-level model
-        
+        atm_level = domain_cfg.get('atm_level_index', 126)  # Default for 128-level model (0-indexed: 0-127)
+
+        # Surface variables should use level 0
+        surface_vars = {'tsfc', 'pressfc'}  # skin_temperature_at_surface is a surface variable
+
         # Generate mappings
         if not input_cf_mapping:
             input_cf_mapping = {}
             for var in input_vars:
                 if var in CF_ATM:
+                    # Use level 0 for surface variables, atm_level for column variables
+                    level = 0 if var in surface_vars else atm_level
                     input_cf_mapping[var] = {
                         'cf_name': CF_ATM[var],
                         'source': 'atmosphere',
-                        'level_index': atm_level
+                        'level_index': level
                     }
                 elif var in CF_OCN:
                     input_cf_mapping[var] = {
@@ -120,15 +131,17 @@ def export_model(checkpoint_path: str, output_path: str):
                     }
                 else:
                     raise ValueError(f"Unknown variable '{var}' - not in CF_ATM or CF_OCN")
-        
+
         if not output_cf_mapping:
             output_cf_mapping = {}
             for var in output_vars:
                 if var in CF_ATM:
+                    # Use level 0 for surface variables, atm_level for column variables
+                    level = 0 if var in surface_vars else atm_level
                     output_cf_mapping[var] = {
                         'cf_name': CF_ATM[var],
                         'source': 'atmosphere',
-                        'level_index': atm_level
+                        'level_index': level
                     }
                 elif var in CF_OCN:
                     output_cf_mapping[var] = {

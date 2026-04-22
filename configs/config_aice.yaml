@@ -3,6 +3,10 @@ model:
   hidden_size: 64
   hidden_layers: 3
   output_size: 1  # Will be computed automatically from output_variables
+  # Optional 1D convolution preprocessing layer (for capturing spatial patterns)
+  use_conv1d: false       # Enable 1D convolution layer before FFNN
+  conv_channels: 32       # Number of conv output channels
+  conv_kernel_size: 3     # Conv kernel size (odd number recommended)
 
 # Define input and output variables
 variables:
@@ -70,6 +74,9 @@ training:
   jacobian_convergence_tolerance: 0.0000000000001  # Relative change in Jacobian metrics
   jacobian_convergence_window: 5      # Number of Jacobian evaluations for convergence
   min_epochs_jacobian: 100000             # Minimum epochs before Jacobian stopping
+  # Exponential Moving Average (EMA) for better generalization
+  use_ema: false         # Enable EMA (recommended for production models)
+  ema_decay: 0.999       # EMA decay rate: higher = slower updates (typical: 0.995-0.9999)
 
 output:
   model_dir: "models_aice/"

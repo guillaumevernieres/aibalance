@@ -183,7 +183,7 @@ class UfsEmulatorTrainer:
             input_mean = torch.tensor(data['input_mean'], dtype=torch.float32)
             input_std = torch.tensor(data['input_std'], dtype=torch.float32)
         elif data_path.endswith('.pt'):
-            data = torch.load(data_path)
+            data = torch.load(data_path, weights_only=False)
             inputs = data['inputs']
             targets = data['targets']
             input_mean = data['input_mean']

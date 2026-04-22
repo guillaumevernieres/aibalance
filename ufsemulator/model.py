@@ -2,13 +2,49 @@
 UfsEmulatorFFNN PyTorch Model in Python
 FFNN to emulate UFS and provide Jacobians
 for balance operators.
+
+Features:
+- Configurable activation functions (ReLU, GELU, Tanh, etc.)
+- Optional 1D convolution preprocessing layer for spatial/vertical patterns
+- Automatic input/output normalization
+- Jacobian computation in both normalized and physical space
+- TorchScript export support
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.init as init
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
+
+
+def get_activation_function(activation: str) -> nn.Module:
+    """
+    Get activation function module by name.
+
+    Args:
+        activation: Name of activation function (case-insensitive)
+                   Options: 'relu', 'gelu', 'tanh', 'sigmoid', 'leakyrelu', 'elu', 'silu'
+
+    Returns:
+        PyTorch activation module
+    """
+    activation_map = {
+        'relu': nn.ReLU(),
+        'gelu': nn.GELU(),
+        'tanh': nn.Tanh(),
+        'sigmoid': nn.Sigmoid(),
+        'leakyrelu': nn.LeakyReLU(),
+        'elu': nn.ELU(),
+        'silu': nn.SiLU(),  # Also known as Swish
+    }
+
+    activation_lower = activation.lower()
+    if activation_lower not in activation_map:
+        available = ', '.join(activation_map.keys())
+        raise ValueError(f"Unknown activation '{activation}'. Available: {available}")
+
+    return activation_map[activation_lower]
 
 
 class UfsEmulatorFFNN(nn.Module):
@@ -17,29 +53,64 @@ class UfsEmulatorFFNN(nn.Module):
     """
 
     def __init__(self, input_size: int, hidden_size: int, output_size: int,
-                 hidden_layers: int = 2, kernel_size: int = 1,
-                 stride: int = 1):
+                 hidden_layers: int = 2, activation: str = 'gelu',
+                 use_conv1d: bool = False, conv_channels: int = 32,
+                 conv_kernel_size: int = 3):
         """
         Initialize the UfsEmulatorFFNN model.
+
+        Args:
+            input_size: Number of input features
+            hidden_size: Number of neurons in hidden layers
+            output_size: Number of output features
+            hidden_layers: Number of hidden layers
+            activation: Activation function name (default: 'gelu')
+                       Options: 'relu', 'gelu', 'tanh', 'sigmoid', 'leakyrelu', 'elu', 'silu'
+            use_conv1d: Whether to add a 1D convolution layer before the FFNN (default: False)
+            conv_channels: Number of output channels for the conv layer (default: 32)
+            conv_kernel_size: Kernel size for the 1D convolution (default: 3)
         """
         super(UfsEmulatorFFNN, self).__init__()
 
+        conv_info = f", conv1d: {conv_channels}ch×{conv_kernel_size}" if use_conv1d else ""
         print(
             f"Starting UfsEmulatorFFNN constructor: {input_size} -> "
-            f"{hidden_layers}x{hidden_size} -> {output_size}"
+            f"{hidden_layers}x{hidden_size} -> {output_size} (activation: {activation}{conv_info})"
         )
+
+        # Optional 1D convolution preprocessing layer
+        self.use_conv1d = use_conv1d
+        if use_conv1d:
+            # Conv1d expects input shape: (batch, channels, length)
+            # We'll treat input_size as the sequence length and add a conv layer
+            # Input: (batch, 1, input_size) -> Output: (batch, conv_channels, seq_len)
+            padding = conv_kernel_size // 2  # Same padding to preserve length
+            self.conv1d = nn.Conv1d(
+                in_channels=1,
+                out_channels=conv_channels,
+                kernel_size=conv_kernel_size,
+                padding=padding
+            )
+            self.conv_activation = get_activation_function(activation)
+            # After conv, flatten: conv_channels * input_size features
+            conv_output_size = conv_channels * input_size
+            first_layer_input_size = conv_output_size
+        else:
+            self.conv1d = None
+            self.conv_activation = None
+            first_layer_input_size = input_size
 
         # Build dynamic network based on hidden_layers
         layers = []
 
-        # First layer: input -> hidden
-        layers.append(nn.Linear(input_size, hidden_size))
-        layers.append(nn.GELU())
+        # First layer: (conv_output or input) -> hidden
+        layers.append(nn.Linear(first_layer_input_size, hidden_size))
+        layers.append(get_activation_function(activation))
 
         # Additional hidden layers: hidden -> hidden
         for _ in range(hidden_layers - 1):
             layers.append(nn.Linear(hidden_size, hidden_size))
-            layers.append(nn.GELU())
+            layers.append(get_activation_function(activation))
 
         # Final layer: hidden -> output (no activation - linear output)
         layers.append(nn.Linear(hidden_size, output_size))
@@ -57,6 +128,10 @@ class UfsEmulatorFFNN(nn.Module):
         self.input_std: torch.Tensor
         self.output_mean: torch.Tensor
         self.output_std: torch.Tensor
+
+        # Register buffer for mask threshold (used with ancillary fields)
+        self.register_buffer('mask_threshold', torch.tensor(0.1))
+        self.mask_threshold: torch.Tensor
 
         # TorchScript-serializable metadata for IO names and arbitrary meta
         self.input_names: List[str] = []
@@ -90,6 +165,15 @@ class UfsEmulatorFFNN(nn.Module):
         Set arbitrary string metadata to be serialized with TorchScript.
         """
         self.meta = dict(kv)
+
+    def set_mask_threshold(self, threshold: float) -> None:
+        """
+        Set threshold for mask computation from ancillary field.
+
+        Args:
+            threshold: Threshold value for masking (e.g., minimum valid value)
+        """
+        self.mask_threshold.data = torch.tensor(threshold)
 
     def init_norm(self, input_mean: torch.Tensor, input_std: torch.Tensor,
                   output_mean: torch.Tensor, output_std: torch.Tensor) -> None:
@@ -126,7 +210,7 @@ class UfsEmulatorFFNN(nn.Module):
         path = file_path.parent
 
         norm_path = path / "normalization.pt"
-        moments = torch.load(norm_path)
+        moments = torch.load(norm_path, weights_only=False)
 
         self.input_mean.data = moments['input_mean']
         self.input_std.data = moments['input_std']
@@ -139,6 +223,13 @@ class UfsEmulatorFFNN(nn.Module):
         """
         Initialize weights using Xavier normal initialization.
         """
+        # Initialize conv layer if present
+        if self.conv1d is not None:
+            init.xavier_normal_(self.conv1d.weight)
+            if self.conv1d.bias is not None:
+                init.zeros_(self.conv1d.bias)
+
+        # Initialize FFNN layers
         for module in self.network:
             if isinstance(module, nn.Linear):
                 init.xavier_normal_(module.weight)
@@ -167,6 +258,15 @@ class UfsEmulatorFFNN(nn.Module):
 
         For end-to-end prediction with physical inputs/outputs, use predict() instead.
         """
+        if self.use_conv1d:
+            # Apply 1D convolution preprocessing
+            # Input shape: (batch, input_size)
+            # Conv1d expects: (batch, channels, length)
+            x = x.unsqueeze(1)  # Add channel dimension: (batch, 1, input_size)
+            x = self.conv1d(x)  # -> (batch, conv_channels, input_size)
+            x = self.conv_activation(x)
+            x = x.flatten(1)  # Flatten to (batch, conv_channels * input_size)
+
         return self.network(x)
 
     @torch.jit.export
@@ -202,7 +302,7 @@ class UfsEmulatorFFNN(nn.Module):
         """
         # Normalize input
         x_norm = self.normalize_input(x)
-        
+
         batch_size = x_norm.shape[0]
         output_size = self.network[-1].out_features
         input_size = x_norm.shape[1]
@@ -212,34 +312,39 @@ class UfsEmulatorFFNN(nn.Module):
         for i in range(output_size):
             # Create a fresh tensor with gradients enabled for each output
             x_norm_copy = x_norm.detach().requires_grad_(True)
-            
+
             # Forward pass through pure network
             y_norm = self.forward(x_norm_copy)
-            
+
             # Create gradient output vector (select i-th output)
             grad_outputs = torch.zeros_like(y_norm)
             grad_outputs[:, i] = 1.0
-            
+
             # Compute gradient using backward pass
             y_norm.backward(grad_outputs)
-            
+
             if x_norm_copy.grad is None:
                 raise RuntimeError("Gradients not computed properly")
-            
+
             jacobians.append(x_norm_copy.grad.clone())
 
         return torch.stack(jacobians, dim=1)
 
     @torch.jit.export
-    def jac_physical(self, x: torch.Tensor) -> torch.Tensor:
+    def jac_physical(self, x: torch.Tensor, ancillary: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Compute Jacobian in PHYSICAL space: ∂y_phys/∂x_phys.
 
         Uses chain rule to transform from normalized Jacobian:
         ∂y_phys/∂x_phys = (output_std / input_std) * ∂y_norm/∂x_norm
 
+        Optionally applies masking to the Jacobian using the ancillary field.
+        If ancillary is None, no masking is applied (all inputs are kept).
+
         Args:
             x: Input in physical space [batch_size, input_size]
+            ancillary: Optional ancillary field for masking [batch_size, mask_size].
+                       If None, no masking is applied.
 
         Returns:
             Jacobian in physical space [batch_size, output_size, input_size]
@@ -256,7 +361,32 @@ class UfsEmulatorFFNN(nn.Module):
         input_std_expanded = self.input_std.view(1, 1, -1)
 
         jac_phys = jac_norm * output_std_expanded / input_std_expanded
+
+        # Apply mask from ancillary field if provided
+        if ancillary is not None:
+            mask = self.compute_mask(ancillary)
+            mask_expanded = mask.unsqueeze(1)
+            jac_phys = torch.where(mask_expanded > 0.5, jac_phys, torch.zeros_like(jac_phys))
+
         return jac_phys
+
+    @torch.jit.export
+    def compute_mask(self, ancillary: torch.Tensor) -> torch.Tensor:
+        """
+        Compute mask from ancillary field based on threshold.
+
+        Default behavior: mask = (ancillary > threshold)
+        Users can customize this method for different masking logic.
+
+        Args:
+            ancillary: Ancillary field [batch_size, ancillary_size]
+
+        Returns:
+            mask: Binary mask [batch_size, ancillary_size] where 1=keep, 0=mask
+        """
+        # Default: threshold-based masking (ancillary > threshold → keep)
+        mask = (ancillary > self.mask_threshold).float()
+        return mask
 
     def jac_norm(self, input_tensor: torch.Tensor) -> torch.Tensor:
         """
@@ -275,7 +405,7 @@ class UfsEmulatorFFNN(nn.Module):
         """
         Load the model from file.
         """
-        self.load_state_dict(torch.load(model_filename))
+        self.load_state_dict(torch.load(model_filename, weights_only=False))
         print(f"Loaded model from: {model_filename}")
 
         for name, param in self.named_parameters():
@@ -306,14 +436,35 @@ class UfsEmulatorFFNN(nn.Module):
 
 def create_ufs_emulator_ffnn(
         input_size: int, hidden_size: int, output_size: int,
-        hidden_layers: int = 2
+        hidden_layers: int = 2, activation: str = 'gelu',
+        use_conv1d: bool = False, conv_channels: int = 32,
+        conv_kernel_size: int = 3
 ) -> UfsEmulatorFFNN:
-    """Factory to create and initialize a UfsEmulatorFFNN model."""
+    """
+    Factory to create and initialize a UfsEmulatorFFNN model.
+
+    Args:
+        input_size: Number of input features
+        hidden_size: Number of neurons in hidden layers
+        output_size: Number of output features
+        hidden_layers: Number of hidden layers
+        activation: Activation function name (default: 'gelu')
+        use_conv1d: Whether to add a 1D convolution layer (default: False)
+        conv_channels: Number of output channels for conv layer (default: 32)
+        conv_kernel_size: Kernel size for 1D convolution (default: 3)
+
+    Returns:
+        Initialized UfsEmulatorFFNN model
+    """
     model = UfsEmulatorFFNN(
         input_size,
         hidden_size,
         output_size,
         hidden_layers,
+        activation=activation,
+        use_conv1d=use_conv1d,
+        conv_channels=conv_channels,
+        conv_kernel_size=conv_kernel_size,
     )
     model.init_weights()
     return model

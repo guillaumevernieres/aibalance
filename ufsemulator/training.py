@@ -2,6 +2,23 @@
 Training application for UfsEmulatorFFNN model
 Handles data loading, training, validation, and model saving.
 Uses YAML configuration files for easy parameter management.
+
+Features:
+- Distributed training support (DDP)
+- Exponential Moving Average (EMA) for better generalization
+- Jacobian convergence tracking for data assimilation
+- Configurable loss functions, optimizers, and schedulers
+- Automatic normalization of inputs/outputs
+
+EMA Usage:
+To enable EMA, add to your config YAML:
+  training:
+    use_ema: true
+    ema_decay: 0.999  # Typical range: 0.995-0.9999
+
+EMA maintains a moving average of model weights that typically provides
+better generalization and more stable predictions. During validation and
+inference, EMA weights are used instead of the raw training weights.
 """
 
 import argparse
@@ -24,6 +41,96 @@ from typing import Any, List, Optional
 
 from .model import create_ufs_emulator_ffnn, UfsEmulatorFFNN
 from .data import create_training_data_from_netcdf
+
+
+class ExponentialMovingAverage:
+    """
+    Exponential Moving Average (EMA) for model parameters.
+
+    Maintains a moving average of model weights that typically provides
+    better generalization and more stable predictions than raw training weights.
+
+    Args:
+        model: The model to track
+        decay: Decay rate (default: 0.999). Higher = slower updates.
+        device: Device for EMA parameters
+    """
+
+    def __init__(self, model: nn.Module, decay: float = 0.999, device: Optional[torch.device] = None):
+        self.decay = decay
+        self.device = device if device is not None else next(model.parameters()).device
+
+        # Store shadow (EMA) parameters
+        self.shadow_params = {}
+        self.backup_params = {}
+
+        # Get actual model (unwrap DDP if needed)
+        if isinstance(model, DDP):
+            actual_model = model.module
+        else:
+            actual_model = model
+
+        # Initialize shadow parameters with model parameters
+        for name, param in actual_model.named_parameters():
+            if param.requires_grad:
+                self.shadow_params[name] = param.data.clone().to(self.device)
+
+    def update(self, model: nn.Module) -> None:
+        """Update EMA parameters with current model parameters."""
+        # Get actual model (unwrap DDP if needed)
+        if isinstance(model, DDP):
+            actual_model = model.module
+        else:
+            actual_model = model
+
+        with torch.no_grad():
+            for name, param in actual_model.named_parameters():
+                if param.requires_grad and name in self.shadow_params:
+                    # EMA update: shadow = decay * shadow + (1 - decay) * param
+                    self.shadow_params[name].mul_(self.decay).add_(
+                        param.data.to(self.device), alpha=1.0 - self.decay
+                    )
+
+    def apply_shadow(self, model: nn.Module) -> None:
+        """Replace model parameters with EMA parameters (for validation/inference)."""
+        # Get actual model (unwrap DDP if needed)
+        if isinstance(model, DDP):
+            actual_model = model.module
+        else:
+            actual_model = model
+
+        # Backup current parameters
+        for name, param in actual_model.named_parameters():
+            if param.requires_grad and name in self.shadow_params:
+                self.backup_params[name] = param.data.clone()
+                param.data.copy_(self.shadow_params[name].to(param.device))
+
+    def restore(self, model: nn.Module) -> None:
+        """Restore original model parameters (after validation/inference)."""
+        # Get actual model (unwrap DDP if needed)
+        if isinstance(model, DDP):
+            actual_model = model.module
+        else:
+            actual_model = model
+
+        # Restore backed up parameters
+        for name, param in actual_model.named_parameters():
+            if param.requires_grad and name in self.backup_params:
+                param.data.copy_(self.backup_params[name])
+
+        self.backup_params.clear()
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Return EMA state for checkpointing."""
+        return {
+            'decay': self.decay,
+            'shadow_params': self.shadow_params
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Load EMA state from checkpoint."""
+        self.decay = state_dict.get('decay', self.decay)
+        self.shadow_params = state_dict['shadow_params']
 
 
 class UfsEmulatorTrainer:
@@ -83,11 +190,20 @@ class UfsEmulatorTrainer:
 
         # Initialize model
         hidden_layers = config['model'].get('hidden_layers', 2)
+        activation = config['model'].get('activation', 'gelu')
+        use_conv1d = config['model'].get('use_conv1d', False)
+        conv_channels = config['model'].get('conv_channels', 32)
+        conv_kernel_size = config['model'].get('conv_kernel_size', 3)
+
         self.model: Union[UfsEmulatorFFNN, DDP] = create_ufs_emulator_ffnn(
             input_size=input_size,
             hidden_size=config['model']['hidden_size'],
             output_size=output_size,
-            hidden_layers=hidden_layers
+            hidden_layers=hidden_layers,
+            activation=activation,
+            use_conv1d=use_conv1d,
+            conv_channels=conv_channels,
+            conv_kernel_size=conv_kernel_size
         ).to(self.device)
 
         # Wrap model for distributed training
@@ -103,6 +219,14 @@ class UfsEmulatorTrainer:
 
         # Initialize scheduler
         self.scheduler = self._create_scheduler()
+
+        # Initialize EMA (Exponential Moving Average)
+        self.ema: Optional[ExponentialMovingAverage] = None
+        if config['training'].get('use_ema', False):
+            ema_decay = config['training'].get('ema_decay', 0.999)
+            self.ema = ExponentialMovingAverage(self.model, decay=ema_decay, device=self.device)
+            if self.rank == 0:
+                print(f"EMA enabled with decay={ema_decay}")
 
         # Training history
         self.history: Dict[str, List[float]] = {
@@ -224,7 +348,7 @@ class UfsEmulatorTrainer:
             output_std = torch.tensor(data['output_std'], dtype=torch.float32)
 
         elif data_path.endswith('.pt'):
-            data = torch.load(data_path)
+            data = torch.load(data_path, weights_only=False)
             inputs = data['inputs']
             targets = data['targets']
 
@@ -357,6 +481,10 @@ class UfsEmulatorTrainer:
             # Update weights
             self.optimizer.step()
 
+            # Update EMA if enabled
+            if self.ema is not None:
+                self.ema.update(self.model)
+
             total_loss += loss.item()
             num_batches += 1
 
@@ -376,25 +504,35 @@ class UfsEmulatorTrainer:
             Tuple of (predictions, targets) as numpy arrays
         """
         self.model.eval()
+
+        # Apply EMA weights if enabled
+        if self.ema is not None:
+            self.ema.apply_shadow(self.model)
+
         predictions = []
         targets = []
 
-        with torch.no_grad():
-            for inputs, batch_targets in val_loader:
-                if len(predictions) >= max_samples:
-                    break
+        try:
+            with torch.no_grad():
+                for inputs, batch_targets in val_loader:
+                    if len(predictions) >= max_samples:
+                        break
 
-                inputs = inputs.to(self.device)
-                batch_targets = batch_targets.to(self.device)
+                    inputs = inputs.to(self.device)
+                    batch_targets = batch_targets.to(self.device)
 
-                outputs = self.model(inputs)
+                    outputs = self.model(inputs)
 
-                # Fix shape mismatch: squeeze model output to match target shape
-                if outputs.dim() > batch_targets.dim():
-                    outputs = outputs.squeeze()
+                    # Fix shape mismatch: squeeze model output to match target shape
+                    if outputs.dim() > batch_targets.dim():
+                        outputs = outputs.squeeze()
 
-                predictions.extend(outputs.cpu().numpy().flatten())
-                targets.extend(batch_targets.cpu().numpy().flatten())
+                    predictions.extend(outputs.cpu().numpy().flatten())
+                    targets.extend(batch_targets.cpu().numpy().flatten())
+        finally:
+            # Restore original weights if EMA was applied
+            if self.ema is not None:
+                self.ema.restore(self.model)
 
         return np.array(predictions[:max_samples]), np.array(targets[:max_samples])
 
@@ -416,39 +554,48 @@ class UfsEmulatorTrainer:
         """
         self.model.eval()
 
+        # Apply EMA weights if enabled
+        if self.ema is not None:
+            self.ema.apply_shadow(self.model)
+
         # Sample a subset of validation data for Jacobian computation
         sample_size = min(100, len(val_loader.dataset))  # Limit for efficiency
         jacobians = []
 
-        with torch.enable_grad():  # Need gradients for Jacobian
-            for i, (inputs, _) in enumerate(val_loader):
-                if i * val_loader.batch_size >= sample_size:
-                    break
+        try:
+            with torch.enable_grad():  # Need gradients for Jacobian
+                for i, (inputs, _) in enumerate(val_loader):
+                    if i * val_loader.batch_size >= sample_size:
+                        break
 
-                inputs = inputs.to(self.device)
-                batch_size = inputs.shape[0]
+                    inputs = inputs.to(self.device)
+                    batch_size = inputs.shape[0]
 
-                # Compute Jacobian for each sample in batch
-                max_samples = min(batch_size,
-                                  sample_size - i * val_loader.batch_size)
-                for j in range(max_samples):
-                    sample_input = inputs[j:j+1].requires_grad_(True)
+                    # Compute Jacobian for each sample in batch
+                    max_samples = min(batch_size,
+                                      sample_size - i * val_loader.batch_size)
+                    for j in range(max_samples):
+                        sample_input = inputs[j:j+1].requires_grad_(True)
 
-                    # Forward pass
-                    output = self.model(sample_input)
+                        # Forward pass
+                        output = self.model(sample_input)
 
-                    # Compute gradients (Jacobian row)
-                    grad_outputs = torch.ones_like(output)
-                    jacobian_row = torch.autograd.grad(
-                        outputs=output,
-                        inputs=sample_input,
-                        grad_outputs=grad_outputs,
-                        create_graph=False,
-                        retain_graph=False
-                    )[0]
+                        # Compute gradients (Jacobian row)
+                        grad_outputs = torch.ones_like(output)
+                        jacobian_row = torch.autograd.grad(
+                            outputs=output,
+                            inputs=sample_input,
+                            grad_outputs=grad_outputs,
+                            create_graph=False,
+                            retain_graph=False
+                        )[0]
 
-                    jacobians.append(
-                        jacobian_row.detach().cpu().numpy().flatten())
+                        jacobians.append(
+                            jacobian_row.detach().cpu().numpy().flatten())
+        finally:
+            # Restore original weights if EMA was applied
+            if self.ema is not None:
+                self.ema.restore(self.model)
 
         if not jacobians:
             return {
@@ -512,24 +659,34 @@ class UfsEmulatorTrainer:
             Average validation loss
         """
         self.model.eval()
+
+        # Apply EMA weights if enabled
+        if self.ema is not None:
+            self.ema.apply_shadow(self.model)
+
         total_loss = 0.0
         num_batches = 0
 
-        with torch.no_grad():
-            for inputs, targets in val_loader:
-                inputs = inputs.to(self.device)
-                targets = targets.to(self.device)
+        try:
+            with torch.no_grad():
+                for inputs, targets in val_loader:
+                    inputs = inputs.to(self.device)
+                    targets = targets.to(self.device)
 
-                outputs = self.model(inputs)
+                    outputs = self.model(inputs)
 
-                # Fix shape mismatch: squeeze model output to match target shape
-                if outputs.dim() > targets.dim():
-                    outputs = outputs.squeeze()
+                    # Fix shape mismatch: squeeze model output to match target shape
+                    if outputs.dim() > targets.dim():
+                        outputs = outputs.squeeze()
 
-                loss = self.criterion(outputs, targets)
+                    loss = self.criterion(outputs, targets)
 
-                total_loss += loss.item()
-                num_batches += 1
+                    total_loss += loss.item()
+                    num_batches += 1
+        finally:
+            # Restore original weights if EMA was applied
+            if self.ema is not None:
+                self.ema.restore(self.model)
 
         return total_loss / num_batches
 
@@ -766,6 +923,10 @@ class UfsEmulatorTrainer:
             'history': self.history,
             'config': self.config
         }
+
+        # Save EMA state if enabled
+        if self.ema is not None:
+            checkpoint['ema_state_dict'] = self.ema.state_dict()
 
         output_dir = Path(self.config['output']['model_dir'])
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1039,7 +1200,7 @@ class UfsEmulatorTrainer:
         if not Path(checkpoint_path).exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
         # Load model state
         if hasattr(self.model, 'module'):  # DDP wrapped model
@@ -1054,6 +1215,12 @@ class UfsEmulatorTrainer:
 
         # Load scheduler state
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+        # Load EMA state if present and enabled
+        if self.ema is not None and 'ema_state_dict' in checkpoint:
+            self.ema.load_state_dict(checkpoint['ema_state_dict'])
+            if self.rank == 0:
+                print("EMA state loaded from checkpoint")
 
         # Load training history
         if 'history' in checkpoint:
@@ -1093,11 +1260,59 @@ class UfsEmulatorTrainer:
 
     def _get_model_dimensions(self) -> Tuple[int, int]:
         """
-        Determine input and output sizes from variable configuration.
+        Determine input and output sizes from configuration.
+
+        Priority order:
+        1. Explicit input_size/output_size in model config (for 3D variables)
+        2. Metadata from processed .npz file
+        3. Count of variables (for 2D variables)
 
         Returns:
             Tuple of (input_size, output_size)
         """
+        model_config = self.config.get('model', {})
+
+        # First priority: Check if sizes are explicitly set in config
+        config_input_size = model_config.get('input_size')
+        config_output_size = model_config.get('output_size')
+
+        if config_input_size is not None and config_output_size is not None:
+            if self.rank == 0:
+                print(f"Using explicit model dimensions from config: {config_input_size} inputs, {config_output_size} outputs")
+            return config_input_size, config_output_size
+
+        # Second priority: Try to read actual sizes from processed data file metadata
+        data_path = self.config.get('data', {}).get('data_path')
+        if data_path:
+            # Try .npz file (processed data)
+            npz_path = Path(data_path).with_suffix('.npz')
+            if npz_path.exists():
+                try:
+                    data = np.load(str(npz_path), allow_pickle=True)
+                    metadata = data.get('metadata', None)
+                    if metadata is not None:
+                        # Extract from nested structure
+                        metadata_dict = metadata.item() if hasattr(metadata, 'item') else metadata
+                        input_size = metadata_dict.get('input_size')
+                        output_size = metadata_dict.get('output_size')
+
+                        if input_size is not None and output_size is not None:
+                            if self.rank == 0:
+                                print(f"Model dimensions from data file: {input_size} inputs, {output_size} outputs")
+                                print(f"Input variables: {metadata_dict.get('input_features', [])}")
+                                print(f"Output variables: {metadata_dict.get('output_features', [])}")
+
+                            # Update config
+                            self.config['model']['input_size'] = input_size
+                            self.config['model']['output_size'] = output_size
+
+                            return input_size, output_size
+                except Exception as e:
+                    if self.rank == 0:
+                        print(f"Could not read metadata from {npz_path}: {e}")
+                        print("Falling back to variable counting...")
+
+        # Third priority: count variables (works for 2D variables only)
         variables_config = self.config.get('variables', {})
 
         # Get input variables
@@ -1240,7 +1455,9 @@ def create_default_config() -> Dict:
             "use_jacobian_stopping": True,
             "jacobian_convergence_tolerance": 1e-3,  # More sensitive for mean abs gradient
             "jacobian_convergence_window": 10,  # Longer window for more stability
-            "min_epochs_jacobian": 30  # Wait longer before checking Jacobian convergence
+            "min_epochs_jacobian": 30,  # Wait longer before checking Jacobian convergence
+            "use_ema": False,  # Enable Exponential Moving Average
+            "ema_decay": 0.999  # EMA decay rate (higher = slower updates)
         },
         "output": {
             "model_dir": "models/"
@@ -1418,6 +1635,8 @@ def main() -> None:
                         help='Restart training from best_model.pt checkpoint')
     parser.add_argument('--restart-from-checkpoint', type=str, default=None,
                         help='Restart training from specific checkpoint file')
+    parser.add_argument('--restart-checkpoint', type=str, default=None,
+                        help='Path to checkpoint file to resume training from')
 
     args = parser.parse_args()
 
@@ -1438,9 +1657,17 @@ def main() -> None:
     data_cfg = config.setdefault('data', {})
     atm_file = data_cfg.get('atm_file')
     ocean_file = data_cfg.get('ocean_file')
-    if atm_file and ocean_file and 'data_path' not in data_cfg:
-        # Use atmosphere file for existence check; data pipeline will read both
-        data_cfg['data_path'] = atm_file
+    if 'data_path' not in data_cfg:
+        # Set data_path for existence check
+        if atm_file and ocean_file:
+            # Use atmosphere file for existence check; data pipeline will read both
+            data_cfg['data_path'] = atm_file
+        elif ocean_file:
+            # Ocean-only emulator (e.g., Salt->Temp)
+            data_cfg['data_path'] = ocean_file
+        elif atm_file:
+            # Atmosphere-only emulator
+            data_cfg['data_path'] = atm_file
 
     # Create sample data if requested
     if args.create_data:
@@ -1492,6 +1719,10 @@ def main() -> None:
     else:
         # Initialize trainer
         trainer = UfsEmulatorTrainer(config)
+
+        # Optionally load checkpoint
+        if args.restart_checkpoint:
+            trainer.load_checkpoint(args.restart_checkpoint)
 
         # Handle restart options
         if args.restart_from_checkpoint:
